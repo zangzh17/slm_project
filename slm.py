@@ -24,7 +24,7 @@ class SLM(_Picklable):
 
     Attributes
     ------
-    name : str
+    name :      
         Name of the SLM.
     shape : (int, int)
         Stores ``(height, width)`` of the SLM in pixels, the same convention as :attr:`numpy.ndarray.shape`.
@@ -120,7 +120,7 @@ class SLM(_Picklable):
         wav_um=1,
         wav_design_um=None,
         pitch_um=(8, 8),
-        settle_time_s=0.3,
+        settle_time_s=0.01,
     ):
         """
         Initialize SLM.

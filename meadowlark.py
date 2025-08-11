@@ -111,20 +111,20 @@ class Meadowlark(SLM):
 
         # Initialize SDK parameters
         self.board_number = ctypes.c_uint(1)
-        bit_depth = ctypes.c_uint(12)
+        bit_depth = ctypes.c_uint(8)
         num_boards_found = ctypes.c_uint(0)
         constructed_okay = ctypes.c_bool(False)
         is_nematic_type = ctypes.c_bool(True)
         RAM_write_enable = ctypes.c_bool(True)
         use_GPU = ctypes.c_bool(True)
-        max_transients = ctypes.c_uint(20)
+        max_transients = ctypes.c_uint(5)
 
         # Standard timing parameters
         self.wait_for_trigger = ctypes.c_uint(0)
         self.flip_immediate = ctypes.c_uint(0)  # Only used on 1024 models
         self.output_pulse_image_flip = ctypes.c_uint(0)
         self.output_pulse_image_refresh = ctypes.c_uint(0)
-        self.timeout_ms = ctypes.c_uint(5000)
+        self.timeout_ms = ctypes.c_uint(1000)
 
         # Initialize the standard SDK
         if verbose:
