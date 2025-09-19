@@ -1,8 +1,8 @@
 # hardware.py
 
 """
-处理与空间光调制器（SLM）的硬件通信。
-如果SLM未连接或SDK未找到，则自动切换到模拟模式。
+Handle hardware communication with Spatial Light Modulator (SLM).
+Automatically switches to simulation mode if SLM is not connected or SDK is not found.
 """
 
 import numpy as np
@@ -23,24 +23,24 @@ class SLMManager:
                 )
                 self.is_connected = True
                 self.shape = self.slm.shape
-                print(f"✅ SLM 连接成功，分辨率: {self.shape}")
+                print(f"✅ SLM connected successfully, resolution: {self.shape}")
             except (ImportError, RuntimeError) as e:
-                print(f"⚠️ 警告: 未能连接到 SLM。将以“仅模拟”模式运行。")
-                print(f"   错误信息: {e}")
-                print(f"   将使用默认分辨率: {self.shape}")
+                print(f"⚠️ Warning: Failed to connect to SLM. Running in simulation mode only.")
+                print(f"   Error message: {e}")
+                print(f"   Using default resolution: {self.shape}")
 
     def upload(self, phase_pattern: np.ndarray):
         """
-        将8位相位图上传到 SLM。
+        Upload 8-bit phase pattern to SLM.
 
         Args:
-            phase_pattern (np.ndarray): uint8 类型的相位图。
+            phase_pattern (np.ndarray): Phase pattern in uint8 format.
         """
         if self.is_connected:
             try:
                 self.slm.set_phase(phase_pattern)
-                print("相位图已上传至 SLM。")
+                print("Phase pattern uploaded to SLM.")
             except Exception as e:
-                print(f"❌ 错误: 上传相位图到 SLM 失败: {e}")
+                print(f"❌ Error: Failed to upload phase pattern to SLM: {e}")
         else:
-            print("（模拟模式）: 假如 SLM 已连接，相位图将会被上传。")
+            print("(Simulation mode): Phase pattern would be uploaded if SLM was connected.")
