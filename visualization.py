@@ -42,8 +42,28 @@ def plot_live_update(iteration: int, total_iterations: int, loss: float, optimiz
     display(fig)
     plt.close(fig)
 
-def plot_final_results(optimizer):
+def plot_final_results(optimizer,info):
     """Display all final result plots after optimization."""
+
+    # Visualize the generated Fresnel microlens array phase pattern.
+    plt.figure(figsize=(12, 7))
+    plt.imshow(info['phi'], cmap='gray', vmin=0, vmax=255)
+    plt.colorbar(label=f"Gray Level (0-{info['two_pi_value']})")
+    # Draw ROI boundary
+    rect = info['roi_rect']
+    plt.gca().add_patch(plt.Rectangle((rect[0], rect[1]), rect[2], rect[3],
+                                      edgecolor='r', facecolor='none', lw=2, label='ROI'))
+    # Calculate and display information
+    f_m = abs(info['focal_length'])
+    lens_w_m = info['lens_width'] * config.PIXEL_SIZE
+    airy_disk_um = calculate_airy_disk(f_m, lens_w_m)
+    title = (
+        f"Diff.Lim. Spot: {airy_disk_um:.2f} µm / {airy_disk_um/config.PIXEL_SIZE:.1f} pix"
+    )
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
     print("\n--- Final Results Visualization ---")
     plot_loss_history(optimizer.history)
     plot_2d_comparisons(optimizer)
@@ -136,7 +156,7 @@ def plot_2d_comparisons(optimizer):
             # Apply logarithmic scale with 4 orders of magnitude
             intensity_map_1_log = np.log10(intensity_map_1 + 1e-10)  # Add small value to avoid log(0)
             vmin_1 = np.percentile(intensity_map_1_log[intensity_map_1_log > -10], 1)
-            vmax_1 = vmin_1 + 4  # 4 orders of magnitude
+            vmax_1 = vmin_1 + 6  # 4 orders of magnitude
             
             im2 = axes[1].imshow(intensity_map_1_log, cmap='hot', 
                                 vmin=vmin_1, vmax=vmax_1,
@@ -259,110 +279,133 @@ def plot_cross_sections(optimizer):
     plt.tight_layout()
     plt.show()
 
-
-
 def plot_zoomed_on_peaks(optimizer):
     """
-    在每个目标信号的中心横截面中查找主峰值，
-    根据峰值宽度的10倍定义缩放区间，并创建一行子图来显示这些感兴趣的区域。
-    
-    Args:
-        optimizer (object): 包含光学系统参数和前向传播方法的优化器对象。
+    Plot zoomed-in views of peak regions from central cross-sections.
+    Each peak region (based on plane wave peaks) is displayed in a separate subplot arranged in a single row.
+    The zoom window width is approximately 1/10 of the average peak spacing.
     """
-    # 1. 获取强度数据 (与原函数相同)
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.signal import find_peaks
+    import torch
+    
     with torch.no_grad():
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
         I_opt_div = optimizer.forward(optimizer.U_in_spherical_divergent, optimizer.spherical_focal_plane_dist_div).cpu().numpy()
         I_opt_conv = optimizer.forward(optimizer.U_in_spherical_convergent, optimizer.spherical_focal_plane_dist_conv).cpu().numpy()
+        tgt_plane = optimizer.target_plane.cpu().numpy()
+        tgt_div = optimizer.target_divergent.cpu().numpy()
+        tgt_conv = optimizer.target_convergent.cpu().numpy()
     
-    # 提取中心横截面
     y_slice = optimizer.N // 2
+    plane_slice = I_opt_plane[y_slice, :]
+    div_slice = I_opt_div[y_slice, :]
+    conv_slice = I_opt_conv[y_slice, :]
     
-    # 将信号和相关信息打包到一个字典中，方便迭代处理
-    signals = {
-        'Plane Wave': {
-            'data': I_opt_plane[y_slice, :],
-            'color': 'b'
-        },
-        'Divergent Wave': {
-            'data': I_opt_div[y_slice, :],
-            'color': 'g'
-        },
-        'Convergent Wave': {
-            'data': I_opt_conv[y_slice, :],
-            'color': 'r'
-        }
-    }
+    tgt_plane_slice = tgt_plane[y_slice, :]
+    tgt_div_slice = tgt_div[y_slice, :]
+    tgt_conv_slice = tgt_conv[y_slice, :]
     
-    # 2. 创建一行子图
-    num_signals = len(signals)
-    # sharey=True 使所有子图共享Y轴，便于比较峰值高度
-    fig, axes = plt.subplots(1, num_signals, figsize=(8 * num_signals, 6), sharey=True)
+    # Find peaks for all three target patterns
+    peaks_plane, _ = find_peaks(tgt_plane[y_slice, :], prominence=5)
+    peaks_div, _ = find_peaks(tgt_div[y_slice, :], prominence=5)
+    peaks_conv, _ = find_peaks(tgt_conv[y_slice, :], prominence=5)
     
-    # 如果只有一个信号，确保axes是一个可迭代的列表
-    if num_signals == 1:
+    # Use only plane wave peaks for creating subplots
+    if len(peaks_plane) == 0:
+        print("No peaks found in plane wave")
+        return
+    
+    # Calculate average peak spacing to determine zoom window width
+    if len(peaks_plane) > 1:
+        peak_spacings = np.diff(peaks_plane)
+        avg_spacing = np.mean(peak_spacings)
+    else:
+        avg_spacing = optimizer.N // 10
+    
+    # Set zoom window width as a fraction of average peak spacing
+    zoom_fraction = 1/8  # Easy to modify: 1/10, 1/8, 1/5, etc.
+    half_window = int(avg_spacing * zoom_fraction)
+    half_window = max(half_window, 10)  # Ensure minimum window size
+    
+    # Create figure with subplots for each plane wave peak
+    n_peaks = len(peaks_plane)
+    fig, axes = plt.subplots(1, n_peaks, figsize=(5*n_peaks, 5))
+    
+    # Handle case where there's only one peak
+    if n_peaks == 1:
         axes = [axes]
-
-    # 3. 遍历每个信号，查找峰值并绘图
-    for ax, (title, props) in zip(axes, signals.items()):
-        data = props['data']
-        color = props['color']
-
-        # 使用 find_peaks 查找所有峰值及其属性（如宽度）
-        # prominence 参数可以帮助过滤掉噪声中的小峰值，这里设置为数据最大值的10%
-        peaks, properties = find_peaks(data, width=1, prominence=(np.max(data) * 0.1, None))
-
-        if len(peaks) == 0:
-            # 如果没有找到峰值，则绘制完整信号并提示
-            ax.plot(data, color=color)
-            ax.set_title(f"{title}\n(No significant peak found)")
-            ax.set_xlabel('X (pixels)')
-            ax.grid(True, which="both", ls="--", alpha=0.6)
-            continue # 处理下一个子图
-
-        # 确定主峰值（强度最高的那个）
-        main_peak_idx_in_peaks_array = np.argmax(data[peaks])
-        peak_pos = peaks[main_peak_idx_in_peaks_array]
-        peak_width = properties['widths'][main_peak_idx_in_peaks_array]
-
-        # 4. 定义缩放区间（基于峰值宽度的10倍）
-        # 缩放窗口的总宽度为 10 * peak_width，所以中心点左右各取 5 * peak_width
-        zoom_half_width = int(np.ceil(5 * peak_width))
-        x_start = max(0, peak_pos - zoom_half_width)
-        x_end = min(len(data), peak_pos + zoom_half_width + 1) # Python切片不包含末尾，故+1
-
-        # 5. 在子图上绘制缩放后的区域
-        x_range = np.arange(x_start, x_end)
-        ax.plot(x_range, data[x_start:x_end], color=color, lw=2)
+    
+    # Get global max for consistent y-scaling across subplots
+    all_data_max = np.max([
+        plane_slice.max(), div_slice.max(), conv_slice.max()
+    ])
+    
+    # Plot zoomed view for each plane wave peak
+    for idx, peak in enumerate(peaks_plane):
+        ax = axes[idx]
         
-        # 标记峰值位置
-        ax.axvline(x=peak_pos, color='k', linestyle='--', linewidth=1.5, label=f'Peak @ {peak_pos}')
+        # Calculate window boundaries
+        x_min = max(0, peak - half_window)
+        x_max = min(len(plane_slice) - 1, peak + half_window)
+        x_range = np.arange(x_min, x_max + 1)
         
-        # 可选：可视化find_peaks计算出的宽度（半高宽）
-        # properties中包含了计算宽度时使用的左右边界点
-        width_y_level = properties['width_heights'][main_peak_idx_in_peaks_array]
-        width_x_min = properties['left_ips'][main_peak_idx_in_peaks_array]
-        width_x_max = properties['right_ips'][main_peak_idx_in_peaks_array]
-        ax.hlines(y=width_y_level, xmin=width_x_min, xmax=width_x_max,
-                  color='black', linestyle=':', label=f'Width: {peak_width:.2f} px')
-
-        # 设置子图的格式
-        ax.set_title(f'Zoom on Peak: {title}')
+        # Plot the zoomed sections
+        ax.plot(x_range, plane_slice[x_min:x_max+1], 'b-', 
+                label='Optimized (Plane)', linewidth=1.5)
+        ax.plot(x_range, div_slice[x_min:x_max+1], 'g-', 
+                label='Optimized (Div)', linewidth=1.5)
+        ax.plot(x_range, conv_slice[x_min:x_max+1], 'r-', 
+                label='Optimized (Conv)', linewidth=1.5)
+        
+        # Plot the zoomed sections
+        ax.plot(x_range, tgt_plane_slice[x_min:x_max+1], 'b--', 
+                label='Target (Plane)', linewidth=1)
+        ax.plot(x_range, tgt_div_slice[x_min:x_max+1], 'g--', 
+                label='Target (Div)', linewidth=1)
+        ax.plot(x_range, tgt_conv_slice[x_min:x_max+1], 'r--', 
+                label='Target (Conv)', linewidth=1)
+        
+        # Mark ALL peaks that fall within this window with vertical lines
+        # Similar to the original plot_cross_sections function
+        
+        # # Plane Wave Peaks (blue) - within window
+        # plane_peaks_in_window = peaks_plane[(peaks_plane >= x_min) & (peaks_plane <= x_max)]
+        # for i, p in enumerate(plane_peaks_in_window):
+        #     label = 'Plane Peaks' if i == 0 else None
+        #     ax.axvline(x=p, color='b', linestyle='--', linewidth=1, label=label)
+        
+        # # Divergent Wave Peaks (green) - within window
+        # div_peaks_in_window = peaks_div[(peaks_div >= x_min) & (peaks_div <= x_max)]
+        # for i, p in enumerate(div_peaks_in_window):
+        #     label = 'Divergent Peaks' if i == 0 else None
+        #     ax.axvline(x=p, color='g', linestyle='--', linewidth=1, label=label)
+        
+        # # Convergent Wave Peaks (red) - within window
+        # conv_peaks_in_window = peaks_conv[(peaks_conv >= x_min) & (peaks_conv <= x_max)]
+        # for i, p in enumerate(conv_peaks_in_window):
+        #     label = 'Convergent Peaks' if i == 0 else None
+        #     ax.axvline(x=p, color='r', linestyle='--', linewidth=1, label=label)
+        
+        # Set log scale and limits
+        ax.set_yscale('log')
+        ax.set_ylim(all_data_max / 1e5, all_data_max * 1.1)
+        
+        # Labels and formatting
         ax.set_xlabel('X (pixels)')
-        ax.legend()
+        if idx == 0:
+            ax.set_ylabel('Intensity (log scale)')
+        ax.set_title(f'Peak at x={peak}')
         ax.grid(True, which="both", ls="--", alpha=0.6)
         
-        # 严格限制X轴范围为缩放区间
-        ax.set_xlim(x_start, x_end - 1)
-
-    # 为共享的Y轴设置标签
-    axes[0].set_ylabel('Intensity')
+        # Only show legend on first subplot to avoid clutter
+        if idx == 0:
+            ax.legend(fontsize=8, loc='best')
     
-    # 为整个图像添加一个总标题
-    fig.suptitle(f'Zoomed View of Main Peaks in Central Cross-section (y={y_slice})', fontsize=16)
-    
-    # 调整布局以防止标题重叠
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.suptitle(f'Zoomed Views of Peak Regions (y={y_slice}, window=±{half_window} pixels)', 
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
     plt.show()
 
 
@@ -386,7 +429,7 @@ def plot_fresnel_pattern(info: dict):
     
     title = (
         f"Fresnel Microlens Array: {info['rows']}×{info['cols']}, f={info['focal_length']:.1f} mm\n"
-        f"Diffraction Limited Spot: {airy_disk_um:.2f} µm"
+        f"Diff.Lim. Spot: {airy_disk_um:.2f} µm / {airy_disk_um/config.PIXEL_SIZE:.1f} pix"
     )
     plt.title(title)
     plt.legend()

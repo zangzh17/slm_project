@@ -85,7 +85,7 @@ def generate_fresnel_pattern(params: dict) -> tuple[np.ndarray, dict]:
     return phi, info
 
 
-def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, object]:
+def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, object, dict]:
     """
     通过优化算法生成微透镜阵列的相位图。
 
@@ -100,6 +100,7 @@ def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, 
     focal_length = (params['focal_length_coarse'] + params['focal_length_fine']) * 1e-3
     if params['lens_type']: 
         focal_length = -focal_length
+
 
     # 使用与generate_fresnel_pattern相同的ROI逻辑
     roi_left = max(0, int(params['roi_center_x'] - params['roi_width'] // 2))
@@ -117,7 +118,7 @@ def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, 
     # 计算优化区域的尺寸 - 使用较小的维度作为正方形边长
     # 或者根据你的具体需求调整
     N = min(actual_roi_width, actual_roi_height)
-
+    M = min(params['rows'], params['cols'])
     optimizer = PhaseOptimizer(
         N=N, 
         pixel_size=config.PIXEL_SIZE, 
@@ -126,7 +127,7 @@ def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, 
         psf_energy_level=params['psf_energy_level'], 
         dof_tol_factor=params['dof_factor'],
         size_factor=params['size_factor'], 
-        M=min(params['rows'], params['cols']),
+        M=M,
         aperture_overlap_ratio=params['overlap_ratio']
     )
     
@@ -172,5 +173,13 @@ def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, 
     combined_phase = np.where(roi_mask, final_phase, checkerboard)
     
     phi = np.uint8(combined_phase / (2 * np.pi) * params['two_pi_value'])
+
+    lens_height = N // M
+    lens_width = N // M
+    info = {
+        'phi': phi, 'focal_length': focal_length, 'rows': M, 'cols': M,
+        'roi_width': N, 'roi_height': N, 'lens_width': lens_width, 'lens_height': lens_height,
+        'two_pi_value': params['two_pi_value'], 'roi_rect': (roi_left, roi_top, N, N)
+    }
     
-    return phi, optimizer
+    return phi, optimizer, info
