@@ -5,7 +5,7 @@
 # 物理常量
 WAVELENGTH = 532e-9         # 波长 (532 nm)
 PIXEL_SIZE = 9.2e-6         # SLM像素尺寸 (9.2 μm)
-FOCAL_OBJECTIVE = 10e-3      # 物镜焦距 (9 mm)
+FOCAL_OBJECTIVE = 10e-3      # 物镜焦距
 NA_OBJECTIVE = 0.7          # 物镜数值孔径
 
 # SLM/ROI 默认参数
@@ -20,14 +20,14 @@ ROI_DEFAULT_SIZE = 1152      # 默认方形ROI尺寸
 COMMON_DEFAULTS = {
     'focal_length_coarse': 50,   # mm
     'focal_length_fine': 0,       # mm (fine adjustment)
-    'rows': 3,                    # 微透镜阵列行数
-    'cols': 3,                    # 微透镜阵列列数
+    'rows': 5,                    # 微透镜阵列行数
+    'cols': 5,                    # 微透镜阵列列数
     'two_pi_value': 220,          # Gray value for 2π phase shift
 }
 
 # Optimized mode特有默认值
 OPTIMIZED_DEFAULTS = {
-    'overlap_ratio': 0.1,
+    'overlap_ratio': 0,
     'dof_factor': 2.0,
     'size_factor': 1.0,
     'psf_energy_level': 1.0,
@@ -41,7 +41,7 @@ DEFAULT_PARAMS = {
     'focal_length': 50e-3,        # 转换为米
     'rows': 5,
     'cols': 5,
-    'overlap_ratio': 0.1,
+    'overlap_ratio': 0,
     'dof_factor': 2.0,
     'size_factor': 1.0,
     'psf_energy_level': 1.0,

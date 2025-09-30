@@ -7,7 +7,6 @@ import numpy as np
 
 # Assuming wave_propagation is an available external library
 import wave_propagation as wp
-from loss import AdaptiveOpticalLoss
 from optics_utils import generate_spherical_wave, create_gaussian_template, create_template_with_centers, disparity_shift
 import config
 
@@ -28,8 +27,8 @@ class PhaseOptimizer:
         # Initialize phase parameters
         self.phase_param = nn.Parameter(torch.rand((N, N), device=self.device) * 2 * np.pi)
         
-        # Initialize loss function
-        self.adaptive_loss = AdaptiveOpticalLoss(num_losses=3).to(self.device)
+        # 为每个损失分量创建一个可学习的对数方差
+        self.log_vars = nn.Parameter(torch.zeros(2, device=self.device))
 
         # Set physical parameters
         self._setup_parameters(dof_tol_factor, psf_energy_level)
@@ -41,7 +40,7 @@ class PhaseOptimizer:
         self._setup_target_patterns(size_factor, aperture_overlap_ratio)
 
         # Initialize history records
-        self.history = {'loss': [], 'mse1': [], 'mse2': [], 'mse3': []}
+        self.history = {'loss': []}
 
     def _setup_parameters(self, dof_tol_factor, psf_energy_level):
         """Calculate depth of field, spherical wave curvature radius and other parameters."""
@@ -97,41 +96,64 @@ class PhaseOptimizer:
 
     def compute_loss(self) -> tuple[torch.Tensor, ...]:
         """Compute MSE losses for three components and total loss."""
-        # Component 1: Depth of field loss (on both sides of focal plane)
-        I_focal_pos_dof = self.forward(self.U_in_plane, self.focal_length + self.depth_of_focus / 2)
-        I_focal_neg_dof = self.forward(self.U_in_plane, self.focal_length - self.depth_of_focus / 2)
-        mse1 = torch.mean((I_focal_pos_dof - self.target_plane)**2) + \
-               torch.mean((I_focal_neg_dof - self.target_plane)**2)
+        
+        # # Component 1: Depth of field loss (on both sides of focal plane)
+        # I_focal_pos_dof = self.forward(self.U_in_plane, self.focal_length + self.depth_of_focus / 2)
+        # I_focal_neg_dof = self.forward(self.U_in_plane, self.focal_length - self.depth_of_focus / 2)
+        # mse1 = torch.mean((I_focal_pos_dof - self.target_plane)**2) + \
+        #        torch.mean((I_focal_neg_dof - self.target_plane)**2)
+        
+        # Component 1: Depth of field loss (on focal plane)
+        I_focal = self.forward(self.U_in_plane, self.focal_length)
+        mse1 = torch.mean((I_focal - self.target_plane)**2)
         
         # Component 2: Divergent wave loss
         I_focal_div = self.forward(self.U_in_spherical_divergent, self.spherical_focal_plane_dist_div)
         mse2 = torch.mean((I_focal_div - self.target_divergent)**2)
 
-        # Component 3: Convergent wave loss
-        I_focal_conv = self.forward(self.U_in_spherical_convergent, self.spherical_focal_plane_dist_conv)
-        mse3 = torch.mean((I_focal_conv - self.target_convergent)**2)
+        # # Component 3: Convergent wave loss
+        # I_focal_conv = self.forward(self.U_in_spherical_convergent, self.spherical_focal_plane_dist_conv)
+        # mse3 = torch.mean((I_focal_conv - self.target_convergent)**2)
         
-        total_loss, weights = self.adaptive_loss(mse1, mse2, mse3)
-        return total_loss, mse1, mse2, mse3, weights
+        # # 基于不确定性的加权总损失 = Σ (exp(-log_var_i) * loss_i + log_var_i)
+        # precision = torch.exp(-self.log_vars)
+        # weights = (precision / precision.sum()).detach()
+        # losses_tensor = torch.stack((mse1,mse2))
+        # total_loss = torch.sum(precision * losses_tensor + self.log_vars)
+        
+        weights = torch.tensor([1.0,1.0],device=self.device)
+        total_loss = torch.sum(weights * torch.stack((mse1, mse2)))
+        
+        return total_loss, mse1, mse2, weights
 
     def optimize(self, num_iterations: int, learning_rate: float, update_callback=None):
         """Execute optimization loop."""
-        optimizer = torch.optim.Adam([self.phase_param, *self.adaptive_loss.parameters()], lr=learning_rate)
+        optimizer = torch.optim.Adam([self.phase_param, self.log_vars], lr=learning_rate)
         start_time = time.time()
         print(f"Starting optimization with {num_iterations} iterations...")
 
         for i in range(num_iterations):
             optimizer.zero_grad()
-            loss, mse1, mse2, mse3, weights = self.compute_loss()
+            # 获取损失函数结果 - 支持可变数量的MSE损失
+            loss_results = self.compute_loss()
+            # 解包结果：loss, mse1, mse2, ..., weights
+            loss = loss_results[0]
+            mse_losses = loss_results[1:-1]  # 中间的所有MSE损失
+            weights = loss_results[-1]       # 最后一个是权重
+            
             loss.backward()
             optimizer.step()
             
             # Record history data
             self.history['loss'].append(loss.item())
-            self.history['mse1'].append(mse1.item() * weights[0].item())
-            self.history['mse2'].append(mse2.item() * weights[1].item())
-            self.history['mse3'].append(mse3.item() * weights[2].item())
-
+            for idx, mse_loss in enumerate(mse_losses, 1):
+                mse_key = f'mse{idx}'
+                if mse_key not in self.history:
+                    self.history[mse_key] = []
+                # 记录加权后的MSE损失
+                weighted_mse = mse_loss.item() * weights[idx-1].item()
+                self.history[mse_key].append(weighted_mse)
+            
             if update_callback and (i % 50 == 0 or i == num_iterations - 1):
                 update_callback(i, num_iterations, loss.item(), self)
 

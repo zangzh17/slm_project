@@ -73,15 +73,37 @@ def plot_final_results(optimizer,info):
 def plot_loss_history(history):
     """Plot historical curves of loss components."""
     plt.figure(figsize=(10, 6))
-    plt.plot(history['mse1'], label='DOF Loss (MSE1 * w1)', marker='o', markersize=3)
-    plt.plot(history['mse2'], label='Divergent Wave Loss (MSE2 * w2)', marker='s', markersize=3)
-    plt.plot(history['mse3'], label='Convergent Wave Loss (MSE3 * w3)', marker='^', markersize=3)
+    # 预定义的损失标签映射 - 可以根据需要扩展
+    loss_labels = {
+        'mse1': 'Focal loss',
+        'mse2': 'Divergent Wave Loss'
+        # 可以继续添加更多...
+    }
+    # 找出所有MSE损失键并排序
+    mse_keys = [key for key in history.keys() if key.startswith('mse') and key != 'mse']
+    mse_keys.sort(key=lambda x: int(x[3:]))  # 按数字排序: mse1, mse2, mse3, ...
+    # 绘制每个MSE损失
+    for mse_key in mse_keys:
+        if mse_key in history and history[mse_key]:  # 确保数据存在且非空
+            label = loss_labels.get(mse_key, f'{mse_key.upper()} Loss ({mse_key.upper()} * w{mse_key[3:]})')
+            plt.plot(history[mse_key], 
+                    label=label, 
+                    linewidth=1.5,
+                    alpha=0.8)
+    # # 可选：也绘制总损失
+    # plt.plot(history['loss'], 
+    #             label='Total Loss', 
+    #             linewidth=2, 
+    #             color='black', 
+    #             alpha=0.7)
+    
     plt.yscale('log')
-    plt.title('Weighted Loss Components History')
+    plt.title('Weighted Loss History')
     plt.xlabel('Iterations')
-    plt.ylabel('Weighted MSE (log scale)')
-    plt.legend()
+    plt.ylabel('Weighted MSE')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left') 
     plt.grid(True, which="both", ls="--", alpha=0.6)
+    plt.tight_layout()
     plt.show()
 
     
@@ -117,7 +139,7 @@ def plot_2d_comparisons(optimizer):
                                       optimizer.spherical_focal_plane_dist_conv).cpu().numpy()
         
         # Define number of samples for propagation analysis
-        n_samples = 40
+        n_samples = 50
         
         # Compute propagation ranges for each wave type
         wave_configs = {
@@ -140,7 +162,7 @@ def plot_2d_comparisons(optimizer):
         
         for name, config in wave_configs.items():
             # Create figure with 1x3 subplots - more compact layout
-            fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
             fig.suptitle(f'Intensity Analysis: {name}', fontsize=14, y=1.02)
             
             # Plot 1: Optimized Intensity
@@ -149,21 +171,21 @@ def plot_2d_comparisons(optimizer):
             axes[0].axis('off')
             plt.colorbar(im1, ax=axes[0], shrink=0.7, pad=0.02)
             
-            # Plot 2: Propagation from 0 to 1.2x focal length
+            # Plot 2: Propagation from 0 to 1.2x focal length, log scale
             z_range_1 = torch.linspace(0, 1.2 * config["focal_dist"], n_samples)
             intensity_map_1 = compute_propagation_map(config["U_in"], z_range_1, optimizer)
             
-            # Apply logarithmic scale with 4 orders of magnitude
+            # Apply logarithmic scale with some orders of magnitude
             intensity_map_1_log = np.log10(intensity_map_1 + 1e-10)  # Add small value to avoid log(0)
             vmin_1 = np.percentile(intensity_map_1_log[intensity_map_1_log > -10], 1)
-            vmax_1 = vmin_1 + 6  # 4 orders of magnitude
+            vmax_1 = vmin_1 + 4  # some orders of magnitude
             
             im2 = axes[1].imshow(intensity_map_1_log, cmap='hot', 
                                 vmin=vmin_1, vmax=vmax_1,
                                 aspect='auto', extent=[0, intensity_map_1.shape[1], 
                                                       z_range_1[-1].item(), 
                                                       z_range_1[0].item()])
-            axes[1].set_title('Propagation (0 - 1.2× focal)', fontsize=10)
+            axes[1].set_title('Propagation (0 - 1.2× focal), log scale', fontsize=10)
             axes[1].set_xlabel('Y Position', fontsize=9)
             axes[1].set_ylabel('Distance', fontsize=9)
             axes[1].tick_params(axis='both', labelsize=8)
@@ -171,7 +193,23 @@ def plot_2d_comparisons(optimizer):
             cbar2.set_label('log₁₀(I)', fontsize=9)
             cbar2.ax.tick_params(labelsize=8)
             
-            # Plot 3: Propagation around focal length ± 5*depth_of_focus
+            # Plot 3: Propagation from 0 to 1.2x focal length, linear scale
+            im3 = axes[2].imshow(intensity_map_1, cmap='hot', 
+                                aspect='auto', extent=[0, intensity_map_1.shape[1], 
+                                                      z_range_1[-1].item(), 
+                                                      z_range_1[0].item()])
+            axes[2].set_title('Propagation (0 - 1.2× focal)', fontsize=10)
+            axes[2].set_xlabel('Y Position', fontsize=9)
+            axes[2].set_ylabel('Distance', fontsize=9)
+            axes[2].tick_params(axis='both', labelsize=8)
+            cbar3 = plt.colorbar(im3, ax=axes[2], shrink=0.7, pad=0.02)
+            cbar3.set_label('log₁₀(I)', fontsize=9)
+            cbar3.ax.tick_params(labelsize=8)
+            # Add a horizontal line at focal plane (z=0) for reference
+            axes[3].axhline(y=0, color='white', linestyle='--', linewidth=0.5, alpha=0.5)
+            
+            
+            # Plot 4: Propagation around focal length ± 5*depth_of_focus
             # Check if depth_of_focus exists, otherwise use a default range
             if hasattr(optimizer, 'depth_of_focus'):
                 z_min = config["focal_dist"] - 5 * optimizer.depth_of_focus
@@ -185,30 +223,33 @@ def plot_2d_comparisons(optimizer):
             z_range_2 = torch.linspace(z_min, z_max, n_samples)
             intensity_map_2 = compute_propagation_map(config["U_in"], z_range_2, optimizer)
             
-            # Apply logarithmic scale with 4 orders of magnitude
-            intensity_map_2_log = np.log10(intensity_map_2 + 1e-10)
-            vmin_2 = np.percentile(intensity_map_2_log[intensity_map_2_log > -10], 1)
-            vmax_2 = vmin_2 + 4  # 4 orders of magnitude
-            
             # Convert to relative distance in micrometers
             focal_dist_um = config["focal_dist"] * 1e6  # Convert to micrometers
             z_range_2_relative_um = (z_range_2 - config["focal_dist"]).numpy() * 1e6  # Convert to μm
             
-            im3 = axes[2].imshow(intensity_map_2_log, cmap='hot', 
-                                vmin=vmin_2, vmax=vmax_2,
+            # # Apply logarithmic scale with 4 orders of magnitude
+            # intensity_map_2_log = np.log10(intensity_map_2 + 1e-10)
+            # vmin_2 = np.percentile(intensity_map_2_log[intensity_map_2_log > -10], 1)
+            # vmax_2 = vmin_2 + 4  # 4 orders of magnitude
+            # im3 = axes[2].imshow(intensity_map_2_log, cmap='hot', 
+            #                     vmin=vmin_2, vmax=vmax_2,
+            #                     aspect='auto', extent=[0, intensity_map_2.shape[1], 
+            #                                           z_range_2_relative_um[-1], 
+            #                                           z_range_2_relative_um[0]])
+            im4 = axes[3].imshow(intensity_map_2, cmap='hot', 
                                 aspect='auto', extent=[0, intensity_map_2.shape[1], 
                                                       z_range_2_relative_um[-1], 
                                                       z_range_2_relative_um[0]])
-            axes[2].set_title('Around Focal (±5×DOF)', fontsize=10)
-            axes[2].set_xlabel('Y Position', fontsize=9)
-            axes[2].set_ylabel('Δz (μm)', fontsize=9)
-            axes[2].tick_params(axis='both', labelsize=8)
-            cbar3 = plt.colorbar(im3, ax=axes[2], shrink=0.7, pad=0.02)
-            cbar3.set_label('log₁₀(I)', fontsize=9)
-            cbar3.ax.tick_params(labelsize=8)
             
+            axes[3].set_title('Around Focal (±5×DOF)', fontsize=10)
+            axes[3].set_xlabel('Y Position', fontsize=9)
+            axes[3].set_ylabel('Δz (μm)', fontsize=9)
+            axes[3].tick_params(axis='both', labelsize=8)
+            cbar4 = plt.colorbar(im4, ax=axes[3], shrink=0.7, pad=0.02)
+            cbar4.set_label('log₁₀(I)', fontsize=9)
+            cbar4.ax.tick_params(labelsize=8)
             # Add a horizontal line at focal plane (z=0) for reference
-            axes[2].axhline(y=0, color='white', linestyle='--', linewidth=0.5, alpha=0.5)
+            axes[3].axhline(y=0, color='white', linestyle='--', linewidth=0.5, alpha=0.5)
             
             plt.tight_layout()
             plt.show()
