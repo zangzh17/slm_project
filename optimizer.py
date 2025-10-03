@@ -62,9 +62,7 @@ class PhaseOptimizer:
         self.U_in_plane = torch.ones((self.N, self.N), device=self.device, dtype=torch.complex64)
         self.U_in_spherical_divergent = generate_spherical_wave(
             self.f_divergent, self.N, self.L, self.wavelength, self.device)
-        self.U_in_spherical_convergent = generate_spherical_wave(
-            self.f_convergent, self.N, self.L, self.wavelength, self.device)
-
+        
     def _setup_target_patterns(self, size_factor, aperture_overlap_ratio):
         """Create target Gaussian templates for plane wave and spherical waves."""
         # 1. Basic target: plane wave incidence
@@ -81,13 +79,6 @@ class PhaseOptimizer:
         self.target_divergent = create_template_with_centers(
             self.N, shifted_centers_div, self.sigma_px, self.device) * self.psf_energy_level
         
-        # 3. Convergent wave target: calculate center point displacement
-        shifted_centers_conv = disparity_shift(
-            self.f_convergent, self.centers_pixel, self.spherical_focal_plane_dist_conv,
-            self.pixel_size, self.N)
-        self.target_convergent = create_template_with_centers(
-            self.N, shifted_centers_conv, self.sigma_px, self.device) * self.psf_energy_level
-
     def forward(self, U_in: torch.Tensor, z: float) -> torch.Tensor:
         """Single forward propagation process."""
         U_phase = U_in * torch.exp(1j * self.phase_param)
@@ -111,10 +102,6 @@ class PhaseOptimizer:
         I_focal_div = self.forward(self.U_in_spherical_divergent, self.spherical_focal_plane_dist_div)
         mse2 = torch.mean((I_focal_div - self.target_divergent)**2)
 
-        # # Component 3: Convergent wave loss
-        # I_focal_conv = self.forward(self.U_in_spherical_convergent, self.spherical_focal_plane_dist_conv)
-        # mse3 = torch.mean((I_focal_conv - self.target_convergent)**2)
-        
         # # 基于不确定性的加权总损失 = Σ (exp(-log_var_i) * loss_i + log_var_i)
         # precision = torch.exp(-self.log_vars)
         # weights = (precision / precision.sum()).detach()
