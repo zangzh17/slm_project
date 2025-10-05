@@ -125,10 +125,13 @@ def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, 
         wavelength=config.WAVELENGTH, 
         focal_length=focal_length,
         psf_energy_level=params['psf_energy_level'], 
-        dof_tol_factor=params['dof_factor'],
-        size_factor=params['size_factor'], 
+        dof_correction=params['dof_correction'],
+        airy_correction=params['airy_correction'], 
         M=M,
-        aperture_overlap_ratio=params['overlap_ratio']
+        aperture_overlap_ratio=params['overlap_ratio'],
+        mask_count=int(params['mask_count']),
+        center_blend=params['center_blend'],
+        interleaving=params['interleaving'],
     )
     
     optimized_phase = optimizer.optimize(

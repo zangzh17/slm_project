@@ -27,9 +27,12 @@ COMMON_DEFAULTS = {
 
 # Optimized mode特有默认值
 OPTIMIZED_DEFAULTS = {
-    'overlap_ratio': 0,
-    'dof_factor': 2.0,
-    'size_factor': 1.0,
+    'overlap_ratio': 0.3,
+    'dof_correction': 1.0,
+    'airy_correction': 1.0,
+    'center_blend': 0.0,
+    'interleaving' : 'coarse1',
+    'mask_count': 2,
     'psf_energy_level': 1.0,
     'z_factor': 0.2,
     'lr': 0.05,                  # learning rate
@@ -37,17 +40,8 @@ OPTIMIZED_DEFAULTS = {
 }
 
 # 优化器内部参数 (non-UI)
-DEFAULT_PARAMS = {
-    'focal_length': 50e-3,        # 转换为米
-    'rows': 5,
-    'cols': 5,
-    'overlap_ratio': 0,
-    'dof_factor': 2.0,
-    'size_factor': 1.0,
-    'psf_energy_level': 1.0,
-    'z_factor': 0.2,
-    'learning_rate': 0.05,
-    'num_iterations': 500,
+OPTIMIZER = {
+    'weights' : [1.0, 1.0]
 }
 
 # 预定义的ROI尺寸选项

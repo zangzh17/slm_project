@@ -28,6 +28,8 @@ class SLMManager:
                 print(f"⚠️ Warning: Failed to connect to SLM. Running in simulation mode only.")
                 print(f"   Error message: {e}")
                 print(f"   Using default resolution: {self.shape}")
+        else:
+            print("🎬 Simulation Mode Enabled")
 
     def upload(self, phase_pattern: np.ndarray):
         """

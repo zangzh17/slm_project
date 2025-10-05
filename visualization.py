@@ -15,10 +15,22 @@ def plot_live_update(iteration: int, total_iterations: int, loss: float, optimiz
     
     # 1. Loss curve
     ax = axes[0]
-    ax.semilogy(optimizer.history['loss'])
+    # only total loss
+    # ax.semilogy(optimizer.history['total_loss']) 
+    # show every loss item
+    for loss_name, loss_values in optimizer.history.items():
+        if loss_name == 'total_loss':
+            linewidth = 2
+            zorder = 10 
+        else:
+            linewidth = 1
+            zorder = 5
+        ax.semilogy(loss_values, label=loss_name, linewidth=linewidth, zorder=zorder)
+    ax.legend()
+    
     ax.set_title(f'Iteration {iteration+1}/{total_iterations}')
     ax.set_xlabel('Iterations')
-    ax.set_ylabel('Total Loss (log scale)')
+    ax.set_ylabel('Loss (log scale)') 
     ax.grid(True, linestyle='--', alpha=0.6)
     
     # 2. Current phase
@@ -65,47 +77,9 @@ def plot_final_results(optimizer,info):
     plt.show()
 
     print("\n--- Final Results Visualization ---")
-    plot_loss_history(optimizer.history)
     plot_2d_comparisons(optimizer)
     plot_cross_sections(optimizer)
     plot_zoomed_on_peaks(optimizer)
-    
-def plot_loss_history(history):
-    """Plot historical curves of loss components."""
-    plt.figure(figsize=(10, 6))
-    # 预定义的损失标签映射 - 可以根据需要扩展
-    loss_labels = {
-        'mse1': 'Focal loss',
-        'mse2': 'Divergent Wave Loss'
-        # 可以继续添加更多...
-    }
-    # 找出所有MSE损失键并排序
-    mse_keys = [key for key in history.keys() if key.startswith('mse') and key != 'mse']
-    mse_keys.sort(key=lambda x: int(x[3:]))  # 按数字排序: mse1, mse2, mse3, ...
-    # 绘制每个MSE损失
-    for mse_key in mse_keys:
-        if mse_key in history and history[mse_key]:  # 确保数据存在且非空
-            label = loss_labels.get(mse_key, f'{mse_key.upper()} Loss ({mse_key.upper()} * w{mse_key[3:]})')
-            plt.plot(history[mse_key], 
-                    label=label, 
-                    linewidth=1.5,
-                    alpha=0.8)
-    # # 可选：也绘制总损失
-    # plt.plot(history['loss'], 
-    #             label='Total Loss', 
-    #             linewidth=2, 
-    #             color='black', 
-    #             alpha=0.7)
-    
-    plt.yscale('log')
-    plt.title('Weighted Loss History')
-    plt.xlabel('Iterations')
-    plt.ylabel('Weighted MSE')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left') 
-    plt.grid(True, which="both", ls="--", alpha=0.6)
-    plt.tight_layout()
-    plt.show()
-
     
 def plot_2d_comparisons(optimizer):
     """Side-by-side comparison of optimized intensity patterns with propagation analysis."""
@@ -133,10 +107,6 @@ def plot_2d_comparisons(optimizer):
     with torch.no_grad():
         # Original intensity calculations
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
-        I_opt_div = optimizer.forward(optimizer.U_in_spherical_divergent, 
-                                    optimizer.spherical_focal_plane_dist_div).cpu().numpy()
-        I_opt_conv = optimizer.forward(optimizer.U_in_spherical_convergent, 
-                                      optimizer.spherical_focal_plane_dist_conv).cpu().numpy()
         
         # Define number of samples for propagation analysis
         n_samples = 50
@@ -147,16 +117,6 @@ def plot_2d_comparisons(optimizer):
                 "U_in": optimizer.U_in_plane,
                 "focal_dist": optimizer.focal_length,
                 "optimized": I_opt_plane
-            },
-            "Divergent Wave": {
-                "U_in": optimizer.U_in_spherical_divergent,
-                "focal_dist": optimizer.spherical_focal_plane_dist_div,
-                "optimized": I_opt_div
-            },
-            "Convergent Wave": {
-                "U_in": optimizer.U_in_spherical_convergent,
-                "focal_dist": optimizer.spherical_focal_plane_dist_conv,
-                "optimized": I_opt_conv
             }
         }
         
@@ -261,30 +221,21 @@ def plot_cross_sections(optimizer):
     """
     with torch.no_grad():
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
-        I_opt_div = optimizer.forward(optimizer.U_in_spherical_divergent, optimizer.spherical_focal_plane_dist_div).cpu().numpy()
-        I_opt_conv = optimizer.forward(optimizer.U_in_spherical_convergent, optimizer.spherical_focal_plane_dist_conv).cpu().numpy()
         tgt_plane = optimizer.target_plane.cpu().numpy()
-        tgt_div = optimizer.target_divergent.cpu().numpy()
-        tgt_conv = optimizer.target_convergent.cpu().numpy()
+
     
     y_slice = optimizer.N // 2
     
     plane_slice = I_opt_plane[y_slice, :]
-    div_slice = I_opt_div[y_slice, :]
-    conv_slice = I_opt_conv[y_slice, :]
     
     plt.figure(figsize=(20, 6))
     
     # Plot optimized curves
     plt.plot(plane_slice, 'b-', label='Optimized (Plane Wave)', lw=1)
-    plt.plot(div_slice, 'g-', label='Optimized (Divergent Wave)', lw=1)
-    plt.plot(conv_slice, 'r-', label='Optimized (Convergent Wave)', lw=1)
     
     # 使用 find_peaks 找到所有峰值的索引
     #    返回的第一个元素是包含所有峰值索引的numpy数组
     peaks_plane, _ = find_peaks(tgt_plane[y_slice, :],prominence=5)
-    peaks_div, _ = find_peaks(tgt_div[y_slice, :],prominence=5)
-    peaks_conv, _ = find_peaks(tgt_conv[y_slice, :],prominence=5)
     
     # 循环为每个找到的峰值绘制垂直线
     # Plane Wave Peaks (blue)
@@ -293,24 +244,6 @@ def plot_cross_sections(optimizer):
         label = 'Plane Peaks' if i == 0 else None
         plt.axvline(x=peak, color='b', linestyle='--', linewidth=1, label=label)
 
-    # Divergent Wave Peaks (green)
-    for i, peak in enumerate(peaks_div):
-        label = 'Divergent Peaks' if i == 0 else None
-        plt.axvline(x=peak, color='g', linestyle='--', linewidth=1, label=label)
-        
-    # Convergent Wave Peaks (red)
-    for i, peak in enumerate(peaks_conv):
-        label = 'Convergent Peaks' if i == 0 else None
-        plt.axvline(x=peak, color='r', linestyle='--', linewidth=1, label=label)
-
-    # --- 修改结束 ---
-
-    all_data_max = np.max([
-        plane_slice.max(), div_slice.max(), conv_slice.max()
-    ])
-    
-    plt.ylim(all_data_max / 1e5, all_data_max * 1.1)
-    
     plt.yscale('log')
     plt.title(f'Central Cross-section Intensity Comparison (y={y_slice})')
     plt.xlabel('X (pixels)')
@@ -333,25 +266,14 @@ def plot_zoomed_on_peaks(optimizer):
     
     with torch.no_grad():
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
-        I_opt_div = optimizer.forward(optimizer.U_in_spherical_divergent, optimizer.spherical_focal_plane_dist_div).cpu().numpy()
-        I_opt_conv = optimizer.forward(optimizer.U_in_spherical_convergent, optimizer.spherical_focal_plane_dist_conv).cpu().numpy()
         tgt_plane = optimizer.target_plane.cpu().numpy()
-        tgt_div = optimizer.target_divergent.cpu().numpy()
-        tgt_conv = optimizer.target_convergent.cpu().numpy()
     
     y_slice = optimizer.N // 2
     plane_slice = I_opt_plane[y_slice, :]
-    div_slice = I_opt_div[y_slice, :]
-    conv_slice = I_opt_conv[y_slice, :]
-    
     tgt_plane_slice = tgt_plane[y_slice, :]
-    tgt_div_slice = tgt_div[y_slice, :]
-    tgt_conv_slice = tgt_conv[y_slice, :]
     
     # Find peaks for all three target patterns
     peaks_plane, _ = find_peaks(tgt_plane[y_slice, :], prominence=5)
-    peaks_div, _ = find_peaks(tgt_div[y_slice, :], prominence=5)
-    peaks_conv, _ = find_peaks(tgt_conv[y_slice, :], prominence=5)
     
     # Use only plane wave peaks for creating subplots
     if len(peaks_plane) == 0:
@@ -378,11 +300,6 @@ def plot_zoomed_on_peaks(optimizer):
     if n_peaks == 1:
         axes = [axes]
     
-    # Get global max for consistent y-scaling across subplots
-    all_data_max = np.max([
-        plane_slice.max(), div_slice.max(), conv_slice.max()
-    ])
-    
     # Plot zoomed view for each plane wave peak
     for idx, peak in enumerate(peaks_plane):
         ax = axes[idx]
@@ -395,43 +312,13 @@ def plot_zoomed_on_peaks(optimizer):
         # Plot the zoomed sections
         ax.plot(x_range, plane_slice[x_min:x_max+1], 'b-', 
                 label='Optimized (Plane)', linewidth=1.5)
-        ax.plot(x_range, div_slice[x_min:x_max+1], 'g-', 
-                label='Optimized (Div)', linewidth=1.5)
-        ax.plot(x_range, conv_slice[x_min:x_max+1], 'r-', 
-                label='Optimized (Conv)', linewidth=1.5)
         
         # Plot the zoomed sections
         ax.plot(x_range, tgt_plane_slice[x_min:x_max+1], 'b--', 
                 label='Target (Plane)', linewidth=1)
-        ax.plot(x_range, tgt_div_slice[x_min:x_max+1], 'g--', 
-                label='Target (Div)', linewidth=1)
-        ax.plot(x_range, tgt_conv_slice[x_min:x_max+1], 'r--', 
-                label='Target (Conv)', linewidth=1)
-        
-        # Mark ALL peaks that fall within this window with vertical lines
-        # Similar to the original plot_cross_sections function
-        
-        # # Plane Wave Peaks (blue) - within window
-        # plane_peaks_in_window = peaks_plane[(peaks_plane >= x_min) & (peaks_plane <= x_max)]
-        # for i, p in enumerate(plane_peaks_in_window):
-        #     label = 'Plane Peaks' if i == 0 else None
-        #     ax.axvline(x=p, color='b', linestyle='--', linewidth=1, label=label)
-        
-        # # Divergent Wave Peaks (green) - within window
-        # div_peaks_in_window = peaks_div[(peaks_div >= x_min) & (peaks_div <= x_max)]
-        # for i, p in enumerate(div_peaks_in_window):
-        #     label = 'Divergent Peaks' if i == 0 else None
-        #     ax.axvline(x=p, color='g', linestyle='--', linewidth=1, label=label)
-        
-        # # Convergent Wave Peaks (red) - within window
-        # conv_peaks_in_window = peaks_conv[(peaks_conv >= x_min) & (peaks_conv <= x_max)]
-        # for i, p in enumerate(conv_peaks_in_window):
-        #     label = 'Convergent Peaks' if i == 0 else None
-        #     ax.axvline(x=p, color='r', linestyle='--', linewidth=1, label=label)
         
         # Set log scale and limits
         ax.set_yscale('log')
-        ax.set_ylim(all_data_max / 1e5, all_data_max * 1.1)
         
         # Labels and formatting
         ax.set_xlabel('X (pixels)')

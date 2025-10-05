@@ -9,7 +9,6 @@ import numpy as np
 import config
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import matplotlib.colors as mcolors
 from typing import Dict, Any, List, Tuple, Optional
 import math
 
@@ -17,6 +16,142 @@ def create_grid(L: float, N: int, device: torch.device) -> tuple[torch.Tensor, t
     """Create coordinate grid"""
     x = torch.linspace(-L / 2, L / 2, N, device=device)
     return torch.meshgrid(x, x, indexing='ij')
+
+
+def visualize_lenses_and_tiles(
+    tiles: List[Dict],
+    M: int,
+    stride_norm: float,
+    region_size_norm: float,
+    mask_count: int,
+    display_lens_idx: Tuple[int, int] = (0, 0),
+    figsize: Tuple[float, float] = (8, 12)
+):
+    """
+    可视化透镜和tiles的布局
+    
+    Parameters:
+    -----------
+    tiles : List[Dict]
+        Tiles列表
+    M : int
+        透镜阵列维度
+    stride_norm : float
+        归一化步长
+    region_size_norm : float
+        归一化区域大小
+    mask_count : int
+        掩膜数量
+    display_lens_idx : Tuple[int, int]
+        要高亮显示的透镜索引
+    figsize : Tuple[float, float]
+        图形大小
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
+    # 左图：显示透镜和tiles
+    ax1.set_title(f'Lenses and Tiles Layout (M={M}, overlap_ratio={(1-stride_norm/region_size_norm):.2f})')
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, 1)
+    ax1.set_aspect('equal')
+    ax1.grid(True, alpha=0.3)
+    
+    # 绘制所有透镜（半透明）
+    for i in range(M):
+        for j in range(M):
+            x_start = i * stride_norm
+            y_start = j * stride_norm
+            
+            if (i, j) == display_lens_idx:
+                # 高亮显示选定的透镜
+                rect = patches.Rectangle(
+                    (x_start, y_start), region_size_norm, region_size_norm,
+                    linewidth=2, edgecolor='red', facecolor='red', alpha=0.3
+                )
+                ax1.add_patch(rect)
+                ax1.text(x_start + region_size_norm/2, y_start + region_size_norm/2,
+                        f'L[{i},{j}]', ha='center', va='center', fontsize=13, fontweight='bold')
+            else:
+                # 其他透镜用淡蓝色
+                rect = patches.Rectangle(
+                    (x_start, y_start), region_size_norm, region_size_norm,
+                    linewidth=1, edgecolor='blue', facecolor='blue', alpha=0.1
+                )
+                ax1.add_patch(rect)
+    
+    # 绘制tiles边界
+    for tile in tiles:
+        rect = patches.Rectangle(
+            (tile['x_start_norm'], tile['y_start_norm']),
+            tile['x_end_norm'] - tile['x_start_norm'],
+            tile['y_end_norm'] - tile['y_start_norm'],
+            linewidth=1, edgecolor='black', facecolor='none'
+        )
+        ax1.add_patch(rect)
+        
+        # 在tile中心显示贡献透镜的数量
+        cx = (tile['x_start_norm'] + tile['x_end_norm']) / 2
+        cy = (tile['y_start_norm'] + tile['y_end_norm']) / 2
+        ax1.text(cx, cy, str(tile['num_lenses']), 
+                ha='center', va='center', fontsize=11, color='green')
+    
+    ax1.set_xlabel('Normalized X')
+    ax1.set_ylabel('Normalized Y')
+    
+    # 右图：显示mask分组
+    ax2.set_title(f'Tile Mask Groups ({mask_count} groups)')
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(0, 1)
+    ax2.set_aspect('equal')
+    ax2.grid(True, alpha=0.3)
+    
+    # 为每个mask组分配颜色
+    colors = plt.cm.get_cmap('tab10', mask_count)
+    
+    for tile in tiles:
+        rect = patches.Rectangle(
+            (tile['x_start_norm'], tile['y_start_norm']),
+            tile['x_end_norm'] - tile['x_start_norm'],
+            tile['y_end_norm'] - tile['y_start_norm'],
+            linewidth=1, edgecolor='black',
+            facecolor=colors(tile['group']), alpha=0.5
+        )
+        ax2.add_patch(rect)
+        
+        # 显示组号
+        cx = (tile['x_start_norm'] + tile['x_end_norm']) / 2
+        cy = (tile['y_start_norm'] + tile['y_end_norm']) / 2
+        ax2.text(cx, cy, str(tile['group']), 
+                ha='center', va='center', fontsize=11)
+    
+    ax2.set_xlabel('Normalized X')
+    ax2.set_ylabel('Normalized Y')
+    
+    # 添加图例
+    legend_elements = [patches.Patch(facecolor=colors(i), alpha=0.5, label=f'Group {i}') 
+                       for i in range(mask_count)]
+    ax2.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 打印统计信息
+    print(f"\nTile Statistics:")
+    print(f"Total tiles: {len(tiles)}")
+    print(f"Grid dimensions: {max(t['grid_kx'] for t in tiles)+1} x {max(t['grid_ky'] for t in tiles)+1}")
+    
+    # 统计每个组的tiles数量
+    group_counts = {i: 0 for i in range(mask_count)}
+    for tile in tiles:
+        group_counts[tile['group']] += 1
+    print(f"Tiles per group: {group_counts}")
+    
+    # 统计透镜贡献分布
+    lens_contributions = {}
+    for tile in tiles:
+        n = tile['num_lenses']
+        lens_contributions[n] = lens_contributions.get(n, 0) + 1
+    print(f"Lens contribution distribution: {lens_contributions}")
 
 
 def create_gaussian_template(
@@ -34,14 +169,21 @@ def create_gaussian_template(
     airy_correction: float = 1.0,
     # Number of interleaved masks (>=2)
     mask_count: int = 2,
-    # Interleaving strategy: "generalized" (v2 style with (a,b) params) or "simple" (v1 style with x+y mod)
-    interleaving: str = "simple"
+    # Interleaving strategy
+    interleaving: str = "checkerboard",
+    # Coarse grid size for coarse interleaving strategies (e.g., 2 means 2x2 subregions)
+    coarse_grid_size: int = 2,
+    # Visualization options
+    visualize: bool = False,
+    display_lens_idx: Tuple[int, int] = (0, 0)
 ) -> Dict[str, Any]:
     """
     Create Gaussian PSF template with overlap geometry and interleaved tile masks.
     
-    This unified function combines the functionality of both v1 and v2 implementations,
-    supporting different interleaving strategies for tile grouping.
+    改进版本：
+    1. 修正了tile划分逻辑，确保覆盖所有像素
+    2. 添加了可视化功能
+    3. 实现了基于粗网格的交错策略
     
     Parameters:
     -----------
@@ -66,30 +208,28 @@ def create_gaussian_template(
     mask_count : int
         Number of interleaved masks to generate
     interleaving : str
-        Strategy for tile interleaving:
-        - "generalized": Uses (a,b) parameters for better dispersion
-        - "simple": Uses simple (x+y) mod grouping
-    weighting : str
-        PSF weighting mode (currently only "per_lens" is supported)
+        Strategy for tile interleaving
+    coarse_grid_size : int
+        Size of coarse grid for coarse_* interleaving strategies
+        (defines super tile size as coarse_grid_size × coarse_grid_size)
+    visualize : bool
+        Whether to visualize the lens and tile layout
+    display_lens_idx : Tuple[int, int]
+        Index of lens to highlight in visualization
     
     Returns:
     --------
-    Dict containing:
-        - normalized_gaussian: Total PSF (normalized)
-        - centers_pixel: PSF centers in pixel coordinates
-        - sigma_px: Gaussian width in pixels
-        - masks: Boolean masks for each group
-        - mask_psfs: PSF for each mask group
-        - tiles: List of all tiles with their properties
-        - tile_indices: (x_bins, y_bins) tile indices for each pixel
-        - info: Dictionary with derived parameters
+    Dict containing all PSF-related data and tile information
     """
     
     assert N > 0 and M > 0
     assert 0.0 <= overlap_ratio < 1.0
     assert mask_count >= 2
-    assert interleaving in ["generalized", "simple"]
-    
+    if mask_count>coarse_grid_size**2:
+        print(f'coarse_grid_size={coarse_grid_size} is too small for current mask_count.')
+        coarse_grid_size = int(math.ceil(math.sqrt(mask_count)))
+        print(f'Use {coarse_grid_size} instead.')
+        
     # Basic grid
     pixel_size = L / N
     Y, X = torch.meshgrid(
@@ -144,69 +284,118 @@ def create_gaussian_template(
     w_px = region_size_norm * scale
     half_w = w_px / 2.0
     
-    # Generate tile boundaries
-    s_px = stride_norm * scale
-    edge_main = torch.arange(0, M + 1, device=device, dtype=torch.float32) * s_px
-    x_edges = torch.cat([edge_main, torch.tensor([float(scale)], device=device)])
-    y_edges = x_edges.clone()
+    # 改进的tile边界生成 - 确保覆盖所有区域
+    # 创建包含所有透镜边界和图像边界的完整边界集合
+    lens_boundaries_x = set()
+    lens_boundaries_y = set()
     
-    # Pixel to tile mapping
-    x_bins = torch.bucketize(X, x_edges, right=False) - 1
-    y_bins = torch.bucketize(Y, y_edges, right=False) - 1
-    x_bins = x_bins.clamp(0, x_edges.numel() - 2)
-    y_bins = y_bins.clamp(0, y_edges.numel() - 2)
+    for i in range(M):
+        x_start = i * stride_norm
+        x_end = min(x_start + region_size_norm, 1.0)
+        lens_boundaries_x.add(x_start)
+        lens_boundaries_x.add(x_end)
     
-    # Interleaving strategy
-    if interleaving == "generalized":
-        # Choose (a,b) parameters for better dispersion
-        def choose_ab(K: int) -> Tuple[int, int]:
-            a, b = 1, 2
-            if math.gcd(K, b) != 1:
-                b = 1
-            return a, b
-        
-        a, b = choose_ab(mask_count)
-        group_id = (a * x_bins + b * y_bins) % mask_count
-    else:  # simple
-        group_id = (x_bins + y_bins) % mask_count
+    for j in range(M):
+        y_start = j * stride_norm
+        y_end = min(y_start + region_size_norm, 1.0)
+        lens_boundaries_y.add(y_start)
+        lens_boundaries_y.add(y_end)
     
-    masks = torch.stack([group_id == k for k in range(mask_count)], dim=0)
+    # 添加图像边界
+    lens_boundaries_x.add(0.0)
+    lens_boundaries_x.add(1.0)
+    lens_boundaries_y.add(0.0)
+    lens_boundaries_y.add(1.0)
     
-    # Generate tiles information
+    # 转换为排序列表
+    norm_edges_x = sorted(lens_boundaries_x)
+    norm_edges_y = sorted(lens_boundaries_y)
+    
+    # 生成tiles
     tiles = []
-    norm_edges_x = [float(k * stride_norm) for k in range(M + 1)] + [1.0]
-    norm_edges_y = norm_edges_x.copy()
-    norm_edges_x = sorted(set(norm_edges_x))
-    norm_edges_y = sorted(set(norm_edges_y))
-    
     for kx in range(len(norm_edges_x) - 1):
         x_start_norm = norm_edges_x[kx]
         x_end_norm = norm_edges_x[kx + 1]
-        tile_width = (x_end_norm - x_start_norm) * L
         
+        # 跳过零宽度的tiles
+        if x_end_norm - x_start_norm < 1e-6:
+            continue
+            
         for ky in range(len(norm_edges_y) - 1):
             y_start_norm = norm_edges_y[ky]
             y_end_norm = norm_edges_y[ky + 1]
+            
+            # 跳过零高度的tiles
+            if y_end_norm - y_start_norm < 1e-6:
+                continue
+            
+            tile_width = (x_end_norm - x_start_norm) * L
             tile_height = (y_end_norm - y_start_norm) * L
             tile_area = tile_width * tile_height
             
-            # Find contributing lenses
+            # 找出贡献的透镜
             contributing_lenses = []
             for ii in range(M):
                 for jj in range(M):
-                    lens_x_start = float(ii) * stride_norm
-                    lens_x_end = lens_x_start + region_size_norm
-                    lens_y_start = float(jj) * stride_norm
-                    lens_y_end = lens_y_start + region_size_norm
+                    lens_x_start = ii * stride_norm
+                    lens_x_end = min(lens_x_start + region_size_norm, 1.0)
+                    lens_y_start = jj * stride_norm
+                    lens_y_end = min(lens_y_start + region_size_norm, 1.0)
                     
+                    # 检查是否有重叠
                     if (x_start_norm < lens_x_end and x_end_norm > lens_x_start and
                         y_start_norm < lens_y_end and y_end_norm > lens_y_start):
                         contributing_lenses.append((ii, jj))
             
-            # Determine group assignment
-            if interleaving == "generalized":
-                group = (a * kx + b * ky) % mask_count
+            # 分配到mask组
+            if interleaving == "checkerboard":
+                # 简单棋盘模式
+                group = (kx + ky) % mask_count
+                
+            elif interleaving.startswith("coarse"):
+                # 基于粗网格的分组策略
+                # 确定当前tile属于哪个super tile
+                super_tile_x = kx // coarse_grid_size
+                super_tile_y = ky // coarse_grid_size
+                
+                # 在super tile内部的位置
+                local_x = kx % coarse_grid_size
+                local_y = ky % coarse_grid_size
+                
+                # Super tile内部的tiles总数
+                tiles_per_super = coarse_grid_size * coarse_grid_size
+                
+                if interleaving == "coarse3":
+                    # 顺序分配：Super tile内的tiles按行优先顺序分配
+                    local_index = local_y * coarse_grid_size + local_x
+                    
+                    if mask_count <= tiles_per_super:
+                        # 如果mask数量不超过super tile内的tiles数
+                        group = local_index % mask_count
+                    else:
+                        # 如果mask数量超过super tile内的tiles数，使用扩展模式
+                        group = (local_index + (super_tile_x + super_tile_y) * tiles_per_super) % mask_count
+                    
+                    # 对奇数super tiles进行组号反转，增加多样性
+                    if (super_tile_x + super_tile_y) % 2 == 1:
+                        group = (mask_count - 1 - group) % mask_count
+                        
+                elif interleaving == "coarse2":
+                    # 顺序分配：Super tile内的tiles按行优先顺序分配
+                    local_index = local_y * coarse_grid_size + local_x
+                    
+                    if mask_count <= tiles_per_super:
+                        # 如果mask数量不超过super tile内的tiles数
+                        group = local_index % mask_count
+                    else:
+                        # 如果mask数量超过super tile内的tiles数，使用扩展模式
+                        group = (local_index + (super_tile_x + super_tile_y) * tiles_per_super) % mask_count
+                elif interleaving == "coarse1":
+                    local_index = local_y  + local_x 
+                    group = local_index % mask_count
+                    
             else:
+                # 默认fallback到checkerboard
                 group = (kx + ky) % mask_count
             
             tiles.append({
@@ -225,6 +414,25 @@ def create_gaussian_template(
                 'group': group,
                 'num_lenses': len(contributing_lenses)
             })
+    
+    # 将tiles转换为像素级的mask
+    # 使用更精确的边界映射
+    x_edges_px = torch.tensor([t * scale for t in norm_edges_x], device=device, dtype=torch.float32)
+    y_edges_px = torch.tensor([t * scale for t in norm_edges_y], device=device, dtype=torch.float32)
+    
+    x_bins = torch.searchsorted(x_edges_px[1:], X.reshape(-1), right=False).reshape(N, N)
+    y_bins = torch.searchsorted(y_edges_px[1:], Y.reshape(-1), right=False).reshape(N, N)
+    
+    # 创建masks
+    masks = torch.zeros((mask_count, N, N), device=device, dtype=torch.bool)
+    for tile in tiles:
+        kx = tile['grid_kx']
+        ky = tile['grid_ky']
+        group = tile['group']
+        
+        # 找到属于这个tile的像素
+        tile_mask = (x_bins == kx) & (y_bins == ky)
+        masks[group] |= tile_mask
     
     # Lens coverage masks
     num_lenses = M * M
@@ -258,7 +466,7 @@ def create_gaussian_template(
         weights = a_lens_mask[l].view(mask_count, 1, 1)
         gaussian_sum_masks += weights * g
     
-    # Normalize using total sum to ensure additivity
+    # Normalize
     denom = gaussian_sum_total.sum().clamp_min(1e-12)
     normalized_gaussian = gaussian_sum_total / denom * (N * N)
     mask_psfs = gaussian_sum_masks / denom * (N * N)
@@ -274,7 +482,7 @@ def create_gaussian_template(
         'region_size_norm': float(region_size_norm),
         'stride_norm': float(stride_norm),
         'w_px': float(w_px),
-        's_px': float(s_px),
+        's_px': float(stride_norm * scale),
         'D_eff': float(D_eff),
         'r_airy': float(r_airy),
         'sigma': float(sigma),
@@ -286,16 +494,19 @@ def create_gaussian_template(
         'mask_count': int(mask_count),
         'interleaving': interleaving,
         'num_tiles': len(tiles),
-        'airy_radius_px': float(r_airy / pixel_size / airy_correction)
+        'airy_radius_px': float(r_airy / pixel_size / airy_correction),
+        'tile_grid_size': (len(norm_edges_x)-1, len(norm_edges_y)-1)
     }
     
-    visualize_lenses_and_tiles(
-        tiles, M,stride_norm,region_size_norm,
-        mask_count,display_lens_idx=[0,0]
-    )
+    # 可视化
+    if visualize:
+        visualize_lenses_and_tiles(
+            tiles, M, stride_norm, region_size_norm,
+            mask_count, display_lens_idx
+        )
     
     return {
-        'normalized_gaussian': normalized_gaussian,
+        'total_psfs': normalized_gaussian,
         'centers_pixel': centers_pixel,
         'sigma_px': sigma_px,
         'masks': masks,
@@ -305,144 +516,7 @@ def create_gaussian_template(
         'tile_indices': (x_bins.to(torch.long), y_bins.to(torch.long)),
         'info': info
     }
-    
-def visualize_lenses_and_tiles(
-    tiles: List[Dict],
-    M: int,
-    stride_norm: float,
-    region_size_norm: float,
-    mask_count: int,
-    display_lens_idx: Optional[Tuple[int, int]] = None,
-    figsize: Tuple[float, float] = (12, 6)
-):
-    """
-    Visualize the lens layout and tile divisions.
-    
-    Parameters:
-    -----------
-    tiles : List[Dict]
-        List of tile dictionaries
-    M : int
-        Number of lenses in each dimension
-    stride_norm : float
-        Normalized stride between lens centers
-    region_size_norm : float
-        Normalized size of each lens
-    mask_count : int
-        Number of mask groups
-    display_lens_idx : Optional[Tuple[int, int]]
-        If provided, only display this specific lens
-    figsize : Tuple[float, float]
-        Figure size
-    """
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-    
-    # Color map for different groups
-    colors = plt.cm.tab10(range(mask_count))
-    
-    # Left plot: Lens layout and tiles
-    ax1.set_title(f'Lens Layout and Tile Division\n(M={M}, overlap_ratio={(1-stride_norm/region_size_norm):.2f})')
-    ax1.set_xlabel('Normalized X')
-    ax1.set_ylabel('Normalized Y')
-    ax1.set_xlim(-0.05, 1.05)
-    ax1.set_ylim(-0.05, 1.05)
-    ax1.set_aspect('equal')
-    ax1.grid(True, alpha=0.3, linestyle='--')
-    
-    # Draw tiles with colors based on group
-    for tile in tiles:
-        rect = patches.Rectangle(
-            (tile['x_start_norm'], tile['y_start_norm']),
-            tile['x_end_norm'] - tile['x_start_norm'],
-            tile['y_end_norm'] - tile['y_start_norm'],
-            linewidth=0.5,
-            edgecolor='gray',
-            facecolor=colors[tile['group']],
-            alpha=0.3
-        )
-        ax1.add_patch(rect)
-    
-    # Draw lenses
-    for i in range(M):
-        for j in range(M):
-            # Skip if we're only showing a specific lens and this isn't it
-            if display_lens_idx is not None and (i, j) != display_lens_idx:
-                continue
-            
-            x_start = i * stride_norm
-            y_start = j * stride_norm
-            
-            # Draw lens boundary
-            rect = patches.Rectangle(
-                (x_start, y_start),
-                region_size_norm,
-                region_size_norm,
-                linewidth=2,
-                edgecolor='red' if display_lens_idx == (i, j) else 'blue',
-                facecolor='none',
-                zorder=5
-            )
-            ax1.add_patch(rect)
-            
-            # Add lens label
-            cx = x_start + region_size_norm / 2
-            cy = y_start + region_size_norm / 2
-            ax1.text(cx, cy, f'L({i},{j})', 
-                    ha='center', va='center', fontsize=8,
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
-                    zorder=10)
-    
-    # Add legend for groups
-    legend_elements = [patches.Patch(facecolor=colors[i], alpha=0.3, 
-                                    edgecolor='gray', label=f'Group {i}') 
-                       for i in range(mask_count)]
-    ax1.legend(handles=legend_elements, loc='upper right', fontsize=8)
-    
-    # Right plot: Tile statistics
-    ax2.set_title('Tile Coverage Statistics')
-    ax2.set_xlabel('Number of Contributing Lenses')
-    ax2.set_ylabel('Number of Tiles')
-    
-    # Count tiles by number of lenses
-    lens_counts = {}
-    for tile in tiles:
-        n = tile['num_lenses']
-        lens_counts[n] = lens_counts.get(n, 0) + 1
-    
-    if lens_counts:
-        counts = sorted(lens_counts.keys())
-        frequencies = [lens_counts[c] for c in counts]
-        
-        bars = ax2.bar(counts, frequencies, color='steelblue', edgecolor='black')
-        ax2.set_xticks(counts)
-        ax2.grid(True, alpha=0.3, axis='y')
-        
-        # Add value labels on bars
-        for bar, freq in zip(bars, frequencies):
-            height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{freq}', ha='center', va='bottom', fontsize=9)
-        
-        # Add text summary
-        total_tiles = len(tiles)
-        text_summary = f'Total tiles: {total_tiles}\n'
-        text_summary += f'Coverage distribution:\n'
-        for c in counts:
-            text_summary += f'  {c} lens{"es" if c != 1 else ""}: {lens_counts[c]} tiles ({100*lens_counts[c]/total_tiles:.1f}%)\n'
-        
-        ax2.text(0.95, 0.95, text_summary,
-                transform=ax2.transAxes,
-                fontsize=9,
-                verticalalignment='top',
-                horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    plt.tight_layout()
-    plt.show()
-    
-    
-    
+
 
 def generate_spherical_wave(
     F: float, N: int, L: float, wavelength: float, device: torch.device
