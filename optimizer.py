@@ -145,7 +145,7 @@ class PhaseOptimizer:
             # visualize or other callback
             if update_callback and (i % 50 == 0 or i == num_iterations - 1):
                 update_callback(i, num_iterations, total_loss.item(), self)
-
+        
         elapsed_time = time.time() - start_time
         print(f"Optimization completed. Time elapsed: {elapsed_time:.2f} seconds")
         return self.phase_param.detach().clone()
