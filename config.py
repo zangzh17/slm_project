@@ -20,8 +20,7 @@ ROI_DEFAULT_SIZE = 1152      # 默认方形ROI尺寸
 COMMON_DEFAULTS = {
     'focal_length_coarse': 50,   # mm
     'focal_length_fine': 0,       # mm (fine adjustment)
-    'rows': 5,                    # 微透镜阵列行数
-    'cols': 5,                    # 微透镜阵列列数
+    'M': 5,                    # 微透镜阵列行列数
     'two_pi_value': 220,          # Gray value for 2π phase shift
 }
 
