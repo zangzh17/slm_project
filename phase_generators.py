@@ -74,7 +74,7 @@ def generate_fresnel_pattern(params: dict) -> tuple[np.ndarray, dict]:
     return phi, info
 
 
-def generate_optimized_pattern(params: dict, vis_callback) -> tuple[np.ndarray, object, dict]:
+def generate_optimized_pattern(params: dict, vis_callback=None) -> tuple[np.ndarray, object, dict]:
     """
     通过优化算法生成微透镜阵列的相位图。
 

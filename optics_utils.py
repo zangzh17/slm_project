@@ -599,3 +599,44 @@ def create_checkerboard(shape):
     """Create checkerboard background pattern (0 and π)."""
     y, x = np.indices(shape)
     return np.pi * ((x + y) % 2)
+
+def process_parameters(raw_params):
+    """
+    Takes a dictionary of raw parameters and returns a processed dictionary
+    ready for simulation functions. This function is UI-independent.
+    """
+    # 复制一份以避免修改原始字典
+    params = raw_params.copy()
+
+    # --- 执行所有计算和逻辑处理 ---
+    # 结合粗调和细调焦距
+    params['focal_length'] = (params.get('focal_length_coarse', 0) + params.get('focal_length_fine', 0)) * 1e-3
+    
+    # 获取SLM尺寸，这里假设它在raw_params中
+    slm_shape = params.get('shape', (1080, 1920)) # 提供一个默认值以防万一
+    slm_height, slm_width = slm_shape
+
+    # 计算ROI边界
+    roi_size = params.get('N', 512) # 使用N作为ROI大小的来源
+    roi_center_x = params.get('roi_center_x', slm_width // 2)
+    roi_center_y = params.get('roi_center_y', slm_height // 2)
+
+    roi_left = max(0, int(roi_center_x - roi_size // 2))
+    roi_right = min(slm_width, int(roi_center_x + roi_size // 2))
+    roi_top = max(0, int(roi_center_y - roi_size // 2))
+    roi_bottom = min(slm_height, int(roi_center_y + roi_size // 2))
+
+    # 确保ROI是正方形
+    actual_roi_width = roi_right - roi_left
+    actual_roi_height = roi_bottom - roi_top
+    params['N'] = min(actual_roi_width, actual_roi_height)
+    params['roi_rect'] = (roi_left, roi_top, params['N'], params['N'])
+
+    # 如果需要，也可以在这里计算 roi_mask
+    y, x = np.indices(slm_shape)
+    params['roi_mask'] = (x >= roi_left) & (x < roi_right) & (y >= roi_top) & (y < roi_bottom)
+
+    # 还可以设置一些固定值
+    params['lens_type'] = False # Always convex
+
+    return params
