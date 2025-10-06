@@ -11,7 +11,7 @@ import config
 def plot_live_update(iteration: int, total_iterations: int, loss: float, optimizer):
     """Display and update images in real-time during optimization."""
     clear_output(wait=True)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4))
     
     # 1. Loss curve
     ax = axes[0]
@@ -40,8 +40,10 @@ def plot_live_update(iteration: int, total_iterations: int, loss: float, optimiz
     ax.set_title('Current Optimized Phase')
     ax.axis('off')
     plt.colorbar(im, ax=ax, label='Phase (rad)')
+
+
     
-    # 3. Current focal plane intensity
+    # 4. Current focal plane intensity
     ax = axes[2]
     with torch.no_grad():
         intensity = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length)
@@ -53,6 +55,23 @@ def plot_live_update(iteration: int, total_iterations: int, loss: float, optimiz
     plt.tight_layout()
     display(fig)
     plt.close(fig)
+
+    # 3. Cross sectional plot for phase
+    
+    # Create separate figure for horizontal cross-section
+    fig_cross = plt.figure(figsize=(12, 4))
+    ax_cross = fig_cross.add_subplot(111)
+
+    center_row = phase_wrapped.shape[0] // 2
+    cross_section = phase_wrapped[center_row, :]
+    ax_cross.plot(cross_section, linewidth=2)
+    ax_cross.set_title(f'Horizontal Cross-Section Phase (Row {center_row})')
+    ax_cross.set_xlabel('Pixel Position')
+    ax_cross.set_ylabel('Phase (rad)')
+    ax_cross.set_ylim(0, 2 * np.pi)
+    ax_cross.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
 def plot_final_results(optimizer,info):
     """Display all final result plots after optimization."""
@@ -100,6 +119,7 @@ def plot_2d_comparisons(optimizer):
             intensity = torch.abs(field)**2
             # Sum along x-axis (axis=1) to get 1D intensity profile
             intensity_1d = intensity.sum(dim=1)
+            intensity_1d = intensity_1d/intensity_1d.max()
             intensity_map[i, :] = intensity_1d
         
         return intensity_map.cpu().numpy()
@@ -135,22 +155,16 @@ def plot_2d_comparisons(optimizer):
             z_range_1 = torch.linspace(0, 1.2 * config["focal_dist"], n_samples)
             intensity_map_1 = compute_propagation_map(config["U_in"], z_range_1, optimizer)
             
-            # Apply logarithmic scale with some orders of magnitude
-            intensity_map_1_log = np.log10(intensity_map_1 + 1e-10)  # Add small value to avoid log(0)
-            vmin_1 = np.percentile(intensity_map_1_log[intensity_map_1_log > -10], 1)
-            vmax_1 = vmin_1 + 4  # some orders of magnitude
-            
-            im2 = axes[1].imshow(intensity_map_1_log, cmap='hot', 
-                                vmin=vmin_1, vmax=vmax_1,
+            im2 = axes[1].imshow(intensity_map_1, cmap='hot',
                                 aspect='auto', extent=[0, intensity_map_1.shape[1], 
                                                       z_range_1[-1].item(), 
                                                       z_range_1[0].item()])
-            axes[1].set_title('Propagation (0 - 1.2× focal), log scale', fontsize=10)
+            axes[1].set_title('Propagation (0 - 1.2× focal)', fontsize=10)
             axes[1].set_xlabel('Y Position', fontsize=9)
             axes[1].set_ylabel('Distance', fontsize=9)
             axes[1].tick_params(axis='both', labelsize=8)
             cbar2 = plt.colorbar(im2, ax=axes[1], shrink=0.7, pad=0.02)
-            cbar2.set_label('log₁₀(I)', fontsize=9)
+            cbar2.set_label('I', fontsize=9)
             cbar2.ax.tick_params(labelsize=8)
             
             # Plot 3: Propagation from 0 to 1.2x focal length, linear scale
@@ -172,8 +186,8 @@ def plot_2d_comparisons(optimizer):
             # Plot 4: Propagation around focal length ± 5*depth_of_focus
             # Check if depth_of_focus exists, otherwise use a default range
             if hasattr(optimizer, 'depth_of_focus'):
-                z_min = config["focal_dist"] - 5 * optimizer.depth_of_focus
-                z_max = config["focal_dist"] + 5 * optimizer.depth_of_focus
+                z_min = config["focal_dist"] - 50 * optimizer.depth_of_focus
+                z_max = config["focal_dist"] + 50 * optimizer.depth_of_focus
             else:
                 # Use 10% of focal length as default if depth_of_focus not available
                 delta = 0.1 * config["focal_dist"]
@@ -184,18 +198,10 @@ def plot_2d_comparisons(optimizer):
             intensity_map_2 = compute_propagation_map(config["U_in"], z_range_2, optimizer)
             
             # Convert to relative distance in micrometers
-            focal_dist_um = config["focal_dist"] * 1e6  # Convert to micrometers
+
             z_range_2_relative_um = (z_range_2 - config["focal_dist"]).numpy() * 1e6  # Convert to μm
             
-            # # Apply logarithmic scale with 4 orders of magnitude
-            # intensity_map_2_log = np.log10(intensity_map_2 + 1e-10)
-            # vmin_2 = np.percentile(intensity_map_2_log[intensity_map_2_log > -10], 1)
-            # vmax_2 = vmin_2 + 4  # 4 orders of magnitude
-            # im3 = axes[2].imshow(intensity_map_2_log, cmap='hot', 
-            #                     vmin=vmin_2, vmax=vmax_2,
-            #                     aspect='auto', extent=[0, intensity_map_2.shape[1], 
-            #                                           z_range_2_relative_um[-1], 
-            #                                           z_range_2_relative_um[0]])
+
             im4 = axes[3].imshow(intensity_map_2, cmap='hot', 
                                 aspect='auto', extent=[0, intensity_map_2.shape[1], 
                                                       z_range_2_relative_um[-1], 
@@ -209,7 +215,7 @@ def plot_2d_comparisons(optimizer):
             cbar4.set_label('log₁₀(I)', fontsize=9)
             cbar4.ax.tick_params(labelsize=8)
             # Add a horizontal line at focal plane (z=0) for reference
-            axes[3].axhline(y=0, color='white', linestyle='--', linewidth=0.5, alpha=0.5)
+            axes[3].axhline(y=0, color='white', linestyle='-', linewidth=0.5, alpha=0.5)
             
             plt.tight_layout()
             plt.show()
@@ -221,7 +227,7 @@ def plot_cross_sections(optimizer):
     """
     with torch.no_grad():
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
-        tgt_plane = optimizer.target_plane.cpu().numpy()
+        tgt_plane = optimizer.total_psfs.cpu().numpy()
 
     
     y_slice = optimizer.N // 2
@@ -242,7 +248,7 @@ def plot_cross_sections(optimizer):
     for i, peak in enumerate(peaks_plane):
         # 只为第一个峰值添加标签，避免图例混乱
         label = 'Plane Peaks' if i == 0 else None
-        plt.axvline(x=peak, color='b', linestyle='--', linewidth=1, label=label)
+        plt.axvline(x=peak, color='r', linestyle='--', linewidth=1, label=label)
 
     plt.yscale('log')
     plt.title(f'Central Cross-section Intensity Comparison (y={y_slice})')
@@ -266,7 +272,7 @@ def plot_zoomed_on_peaks(optimizer):
     
     with torch.no_grad():
         I_opt_plane = optimizer.forward(optimizer.U_in_plane, optimizer.focal_length).cpu().numpy()
-        tgt_plane = optimizer.target_plane.cpu().numpy()
+        tgt_plane = optimizer.total_psfs.cpu().numpy()
     
     y_slice = optimizer.N // 2
     plane_slice = I_opt_plane[y_slice, :]
@@ -299,9 +305,13 @@ def plot_zoomed_on_peaks(optimizer):
     # Handle case where there's only one peak
     if n_peaks == 1:
         axes = [axes]
-    
+    y_max = np.max(tgt_plane_slice)
+    y_min = y_max * 1e-6  # 6 orders of magnitude below max
+
+
     # Plot zoomed view for each plane wave peak
     for idx, peak in enumerate(peaks_plane):
+
         ax = axes[idx]
         
         # Calculate window boundaries
@@ -314,11 +324,12 @@ def plot_zoomed_on_peaks(optimizer):
                 label='Optimized (Plane)', linewidth=1.5)
         
         # Plot the zoomed sections
-        ax.plot(x_range, tgt_plane_slice[x_min:x_max+1], 'b--', 
+        ax.plot(x_range, tgt_plane_slice[x_min:x_max+1], 'r--', 
                 label='Target (Plane)', linewidth=1)
         
         # Set log scale and limits
         ax.set_yscale('log')
+        ax.set_ylim(y_min, y_max)
         
         # Labels and formatting
         ax.set_xlabel('X (pixels)')
