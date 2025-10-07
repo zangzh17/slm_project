@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 import time
 import config
 from collections import defaultdict
@@ -37,6 +38,11 @@ class PhaseGenerator:
         print(f"Using device: {self.device}")
         
         # simple calculations for other parameters
+        self.L = None
+        self.lens_width = None
+        self.f_number = None
+        self.depth_of_focus = None
+        self.airy_radius = None
         self._update_parameters()
         
         # Results (set after generate)
@@ -44,12 +50,14 @@ class PhaseGenerator:
         self.phase_8bit = None
         self.history = None  # Only for optimized
         self.total_psfs = None
+        self.centers_pixel = None
         
         # Optimization attributes (set in _optimize_phase)
         self.phase_param = None # raw phase in nn.parameters
         self.U_masked = None
         self.total_psfs_up = None
         self.mask_psfs_up = None
+        self.centers_pixel_up = None
 
     def generate_fresnel_phase(self,N=None) -> np.ndarray:
         """
@@ -102,21 +110,50 @@ class PhaseGenerator:
         
         U_focal = wp.propagate_ASM(U_phase, z, self.L, self.wavelength, self.device)
         return torch.abs(U_focal)**2
-
+    
     def compute_loss(self, upsampling=1.0) -> tuple[torch.Tensor, dict]:
         """Compute losses"""
+        if upsampling != 1.0:
+            N = int(self.N * upsampling)
+            pixel_size = self.L/N
+        else:
+            N = self.N
+            pixel_size = self.pixel_size
+            
         loss_fn = nn.MSELoss()
         
+        # MSE loss for focal plane
         I_focal_full = self.forward(z=self.focal_length, upsampling=upsampling)
-        loss1 = loss_fn(I_focal_full, self.total_psfs_up)
+        mse = loss_fn(I_focal_full, self.total_psfs_up)
         
+        # Average focusing efficiency loss for focal plane
+        x_grid, y_grid = torch.meshgrid(torch.arange(N, device=self.device),
+                                        torch.arange(N, device=self.device),
+                                        indexing='ij')
+        efficiencies = []
+        theoretical_efficiency = (N ** 2) / (self.M * self.M)
+        for center in self.centers_pixel_up: 
+            distances = torch.sqrt((x_grid - center[0]) ** 2 + (y_grid - center[1]) ** 2)
+            mask = distances <= self.airy_radius / pixel_size
+            encircled_energy = I_focal_full[mask].sum()
+            efficiencies.append(encircled_energy / theoretical_efficiency)
+        efficiencies = torch.stack(efficiencies)
+        efficiency_mean = efficiencies.mean()
+        efficiency_std = efficiencies.std()
+        
+        # Masked loss
         I_focal_masked = self.forward(U_in=self.U_masked, z=self.focal_length, upsampling=upsampling)
-        loss2 = loss_fn(I_focal_masked, self.mask_psfs_up)
+        mse_masked = loss_fn(I_focal_masked, self.mask_psfs_up)
         
-        total_loss = torch.sum(torch.stack((loss1, loss2)))
+        total_loss = torch.sum(torch.stack((mse, 
+                                            -10*efficiency_mean, 
+                                            10*efficiency_std, 
+                                            mse_masked)))
         loss_components = {
-            'focal_loss': loss1.item(),
-            'mask_loss': loss2.item(),
+            'focal_mse': mse.item(),
+            'eff_mean': efficiency_mean.item(),
+            'eff_std': efficiency_std.item(),
+            'masked': mse_masked.item(),
             'total_loss': total_loss.item()
         }
         return total_loss, loss_components
@@ -128,21 +165,25 @@ class PhaseGenerator:
         if mode == 'fresnel':
             self.lens_width = self.L / self.M
             self.f_number = self.focal_length / self.lens_width
-            self.depth_of_focus = 2*self.wavelength*self.f_number**2            
+            self.depth_of_focus = 2*self.wavelength*self.f_number**2 
+            self.airy_radius = 1.22*self.wavelength*self.f_number
         elif mode == 'optimized':
             region_size_norm = 1.0 / (self.M - (self.M - 1) * self.overlap_ratio)
             self.lens_width = self.L * region_size_norm
             self.f_number = self.focal_length / self.lens_width 
             self.depth_of_focus = 2*self.wavelength*self.f_number**2
+            self.airy_radius = 1.22*self.wavelength*self.f_number
     
     def _prepare_template(self,upsampling=1.0):
         if upsampling != 1.0:
             N = int(self.N * upsampling)
+            pixel_size = self.L/N
         else:
             N = self.N
         # Target patterns for optimization
         results = create_gaussian_template(
-            N, self.L, self.focal_length, 
+            N, 
+            self.L, self.focal_length, 
             self.wavelength, self.M, 
             self.overlap_ratio, self.device,
             airy_correction=self.airy_correction, 
@@ -152,17 +193,20 @@ class PhaseGenerator:
         self.mask_psfs_up = results['mask_psfs'] * self.psf_energy_level
         self.total_psfs_up = results['total_psfs'] * self.psf_energy_level
         masks = results['masks']
+        self.centers_pixel_up = results['centers_pixel']
         
         # target patterns for general use
         results = create_gaussian_template(
-            self.N, self.L, self.focal_length, 
+            self.N, 
+            self.L, self.focal_length, 
             self.wavelength, self.M, 
             self.overlap_ratio, self.device,
             airy_correction=self.airy_correction, 
             center_blend=self.center_blend, mask_count=self.mask_count,
-            visualize=True, interleaving=self.interleaving
+            visualize=False, interleaving=self.interleaving
         )
         self.total_psfs = results['total_psfs']
+        self.centers_pixel = results['centers_pixel']
         
         # Incident modulation for optimization
         self.U_masked = masks.to(device=self.device, dtype=torch.complex64)
@@ -183,7 +227,7 @@ class PhaseGenerator:
         optimizer = torch.optim.Adam([self.phase_param], lr=self.lr)
         self.history = defaultdict(list) 
         start_time = time.time()
-        
+        loss_str_history = [] 
         print(f"Starting optimization with {self.ni} iterations...")
         for i in range(self.ni):
             optimizer.zero_grad()
@@ -198,8 +242,9 @@ class PhaseGenerator:
                 if update_callback:
                     update_callback(i, self.ni, total_loss.item(), self.phase_param)
                 else:
-                    print(f"Iter: {i+1}/{self.ni} Loss: {total_loss.item():.4e}", end='\r', flush=True)
-                    # print(f"Iter: {i}/{self.ni} Loss: {total_loss.item():.4e}")
+                    loss_str = " ".join([f"{k.capitalize()}: {v:.4f}" for k, v in loss_components.items() if k != 'total_loss'])
+                    loss_str += f" Total: {loss_components['total_loss']:.4e}" if 'total_loss' in loss_components else ""
+                    print(f"Iter: {i+1}/{self.ni} {loss_str}", flush=True)
         
         elapsed_time = time.time() - start_time
         print() 

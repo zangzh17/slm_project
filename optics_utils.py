@@ -153,37 +153,31 @@ def visualize_lenses_and_tiles(
         lens_contributions[n] = lens_contributions.get(n, 0) + 1
     print(f"Lens contribution distribution: {lens_contributions}")
 
-
 def create_gaussian_template(
-    N: int,
-    L: float,
-    focal_length: float,
-    wavelength: float,
-    M: int,
-    overlap_ratio: float,
-    device: torch.device,
-    *,
-    # PSF center interpolation: 0=grid centers without overlap, 1=geometric centers with overlap
-    center_blend: float = 0.0,
-    # Airy disk correction factor
-    airy_correction: float = 1.0,
-    # Number of interleaved masks (>=2)
-    mask_count: int = 2,
-    # Interleaving strategy
-    interleaving: str = "checkerboard",
-    # Coarse grid size for coarse interleaving strategies (e.g., 2 means 2x2 subregions)
-    coarse_grid_size: int = 2,
-    # Visualization options
-    visualize: bool = False,
-    display_lens_idx: Tuple[int, int] = (0, 0)
-) -> Dict[str, Any]:
+        N: int,
+        L: float,
+        focal_length: float,
+        wavelength: float,
+        M: int,
+        overlap_ratio: float,
+        device: torch.device,
+        *,
+        # PSF center interpolation: 0=grid centers without overlap, 1=geometric centers with overlap
+        center_blend: float = 0.0,
+        # Airy disk correction factor
+        airy_correction: float = 1.0,
+        # Number of interleaved masks (>=2)
+        mask_count: int = 2,
+        # Interleaving strategy
+        interleaving: str = "checkerboard",
+        # Coarse grid size for coarse interleaving strategies (e.g., 2 means 2x2 subregions)
+        coarse_grid_size: int = 2,
+        # Visualization options
+        visualize: bool = False,
+        display_lens_idx: Tuple[int, int] = (0, 0)
+    ) -> Dict[str, Any]:
     """
     Create Gaussian PSF template with overlap geometry and interleaved tile masks.
-    
-    改进版本：
-    1. 修正了tile划分逻辑，确保覆盖所有像素
-    2. 添加了可视化功能
-    3. 实现了基于粗网格的交错策略
     
     Parameters:
     -----------
@@ -219,13 +213,13 @@ def create_gaussian_template(
     
     Returns:
     --------
-    Dict containing all PSF-related data and tile information
+    Dict containing essential PSF-related data, masks, and variables useful for focusing efficiency calculations.
     """
     
     assert N > 0 and M > 0
     assert 0.0 <= overlap_ratio < 1.0
     assert mask_count >= 2
-    if mask_count>coarse_grid_size**2:
+    if mask_count > coarse_grid_size**2:
         print(f'coarse_grid_size={coarse_grid_size} is too small for current mask_count.')
         coarse_grid_size = int(math.ceil(math.sqrt(mask_count)))
         print(f'Use {coarse_grid_size} instead.')
@@ -471,32 +465,13 @@ def create_gaussian_template(
     normalized_gaussian = gaussian_sum_total / denom * (N * N)
     mask_psfs = gaussian_sum_masks / denom * (N * N)
     
-    # Group tiles by mask
-    masks_tiles = [[] for _ in range(mask_count)]
-    for tile in tiles:
-        masks_tiles[tile['group']].append(tile)
+    # Group tiles by mask (removed as unused)
+    # masks_tiles = [[] for _ in range(mask_count)]
+    # for tile in tiles:
+    #     masks_tiles[tile['group']].append(tile)
     
-    # Information summary
-    info = {
-        'pixel_size': pixel_size,
-        'region_size_norm': float(region_size_norm),
-        'stride_norm': float(stride_norm),
-        'w_px': float(w_px),
-        's_px': float(stride_norm * scale),
-        'D_eff': float(D_eff),
-        'r_airy': float(r_airy),
-        'sigma': float(sigma),
-        'sigma_px': float(sigma_px),
-        'center_blend': float(t),
-        'airy_correction': float(airy_correction),
-        'overlap_ratio': float(overlap_ratio),
-        'M': int(M),
-        'mask_count': int(mask_count),
-        'interleaving': interleaving,
-        'num_tiles': len(tiles),
-        'airy_radius_px': float(r_airy / pixel_size / airy_correction),
-        'tile_grid_size': (len(norm_edges_x)-1, len(norm_edges_y)-1)
-    }
+    # Compute airy_radius_px for focusing efficiency
+    airy_radius_px = float(r_airy / pixel_size / airy_correction)
     
     # 可视化
     if visualize:
@@ -508,15 +483,9 @@ def create_gaussian_template(
     return {
         'total_psfs': normalized_gaussian,
         'centers_pixel': centers_pixel,
-        'sigma_px': sigma_px,
         'masks': masks,
-        'mask_psfs': mask_psfs,
-        'tiles': tiles,
-        'masks_tiles': masks_tiles,
-        'tile_indices': (x_bins.to(torch.long), y_bins.to(torch.long)),
-        'info': info
+        'mask_psfs': mask_psfs
     }
-
 
 def generate_spherical_wave(
     F: float, N: int, L: float, wavelength: float, device: torch.device
