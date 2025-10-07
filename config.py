@@ -13,14 +13,12 @@ SLM_SHAPE = (1152, 1920)     # SLM 分辨率
 SLM_SDK_PATH = "C:\\Program Files\\Meadowlark Optics\\Blink OverDrive Plus"
 SLM_LUT_PATH = "C:\\Program Files\\Meadowlark Optics\\SDK\\slm5691_at635.LUT"
 
-# ROI默认设置 (方形)
-ROI_DEFAULT_SIZE = 1152      # 默认方形ROI尺寸
 
 # 通用UI默认值 (both Optimized and Fresnel modes共享)
 COMMON_DEFAULTS = {
     'focal_length_coarse': 50,   # mm
     'focal_length_fine': 0,       # mm (fine adjustment)
-    'M': 5,                    # 微透镜阵列行列数
+    'M': 7,                    # 微透镜阵列行列数
     'two_pi_value': 220,          # Gray value for 2π phase shift
 }
 
@@ -39,10 +37,11 @@ OPTIMIZED_DEFAULTS = {
 }
 
 # 优化器内部参数 (non-UI)
-OPTIMIZER = {
-    'weights' : [1.0, 1.0]
+INTERNAL = {
 }
 
+# ROI默认设置 (方形)
+ROI_DEFAULT_SIZE = 1152      # 默认方形ROI尺寸
 # 预定义的ROI尺寸选项
 ROI_SIZE_OPTIONS = {
     '100%': 1152,

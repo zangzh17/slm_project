@@ -589,11 +589,11 @@ def calculate_linear_phase(shape, angle_x_mrad, angle_y_mrad):
     
     return phase_gradient_x * x_meters + phase_gradient_y * y_meters
 
-def calculate_airy_disk(focal_length_m, aperture_width_m):
+def calculate_airy_disk(focal_length_m, aperture_width_m, wavelength):
     """Calculate diffraction-limited spot size (Airy disk diameter)."""
     f_number = focal_length_m / aperture_width_m
-    airy_disk_diameter_m = 2.44 * config.WAVELENGTH * f_number
-    return airy_disk_diameter_m * 1e6  # Return in micrometers
+    airy_disk_diameter_m = 2.44 * wavelength * f_number
+    return airy_disk_diameter_m
 
 def create_checkerboard(shape):
     """Create checkerboard background pattern (0 and π)."""
@@ -631,12 +631,5 @@ def process_parameters(raw_params):
     actual_roi_height = roi_bottom - roi_top
     params['N'] = min(actual_roi_width, actual_roi_height)
     params['roi_rect'] = (roi_left, roi_top, params['N'], params['N'])
-
-    # 如果需要，也可以在这里计算 roi_mask
-    y, x = np.indices(slm_shape)
-    params['roi_mask'] = (x >= roi_left) & (x < roi_right) & (y >= roi_top) & (y < roi_bottom)
-
-    # 还可以设置一些固定值
-    params['lens_type'] = False # Always convex
 
     return params
