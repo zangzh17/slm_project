@@ -16,7 +16,7 @@ SLM_LUT_PATH = "C:\\Program Files\\Meadowlark Optics\\SDK\\slm5691_at635.LUT"
 
 # 通用UI默认值 (both Optimized and Fresnel modes共享)
 COMMON_DEFAULTS = {
-    'focal_length_coarse': 50,   # mm
+    'focal_length_coarse': 60,   # mm
     'focal_length_fine': 0,       # mm (fine adjustment)
     'M': 7,                    # 微透镜阵列行列数
     'two_pi_value': 220,          # Gray value for 2π phase shift

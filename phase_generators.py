@@ -134,7 +134,7 @@ class PhaseGenerator:
         theoretical_efficiency = (N ** 2) / (self.M * self.M)
         for center in self.centers_pixel_up: 
             distances = torch.sqrt((x_grid - center[0]) ** 2 + (y_grid - center[1]) ** 2)
-            mask = distances <= self.airy_radius / pixel_size
+            mask = distances <= self.airy_radius * self.airy_correction / pixel_size
             encircled_energy = I_focal_full[mask].sum()
             efficiencies.append(encircled_energy / theoretical_efficiency)
         efficiencies = torch.stack(efficiencies)
@@ -174,7 +174,7 @@ class PhaseGenerator:
             self.depth_of_focus = 2*self.wavelength*self.f_number**2
             self.airy_radius = 1.22*self.wavelength*self.f_number
     
-    def _prepare_template(self,upsampling=1.0):
+    def _prepare_template(self,upsampling=1.0,visualize=True):
         if upsampling != 1.0:
             N = int(self.N * upsampling)
             pixel_size = self.L/N
@@ -188,7 +188,7 @@ class PhaseGenerator:
             self.overlap_ratio, self.device,
             airy_correction=self.airy_correction, 
             center_blend=self.center_blend, mask_count=self.mask_count,
-            visualize=True, interleaving=self.interleaving
+            visualize=visualize, interleaving=self.interleaving
         )
         self.mask_psfs_up = results['mask_psfs'] * self.psf_energy_level
         self.total_psfs_up = results['total_psfs'] * self.psf_energy_level
@@ -290,7 +290,7 @@ class PhaseGenerator:
         if mode == 'fresnel':
             self.phase = self.generate_fresnel_phase()
             self.phase_param = torch.tensor(self.phase, device=self.device, dtype=torch.float32)
-            self._prepare_template()
+            self._prepare_template(visualize=False)
             self._update_parameters(mode=mode)
             
         elif mode == 'optimized':
