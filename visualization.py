@@ -2,13 +2,15 @@
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import numpy as np
-from scipy.signal import find_peaks
+
 from scipy import ndimage
 import torch
 from scipy.ndimage import zoom
+from typing import Dict, List, Tuple
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from IPython.display import display, clear_output
 from optics_utils import calculate_airy_disk
-import config
 
 def plot_live_update(iteration: int, total_iterations: int, loss: float, optimizer):
     """Display and update images in real-time during optimization."""
@@ -373,3 +375,141 @@ def plot_fresnel_pattern(optimizer):
     plt.title(title)
     plt.legend()
     plt.show()
+
+
+
+
+def visualize_lenses_and_tiles(
+    tiles: List[Dict],
+    M: int,
+    stride_norm: float,
+    region_size_norm: float,
+    mask_count: int,
+    display_lens_idx: Tuple[int, int] = (0, 0),
+    figsize: Tuple[float, float] = (8, 12)
+):
+    """
+    可视化透镜和tiles的布局
+    
+    Parameters:
+    -----------
+    tiles : List[Dict]
+        Tiles列表
+    M : int
+        透镜阵列维度
+    stride_norm : float
+        归一化步长
+    region_size_norm : float
+        归一化区域大小
+    mask_count : int
+        掩膜数量
+    display_lens_idx : Tuple[int, int]
+        要高亮显示的透镜索引
+    figsize : Tuple[float, float]
+        图形大小
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
+    # 左图：显示透镜和tiles
+    ax1.set_title(f'Lenses and Tiles Layout (M={M}, overlap_ratio={(1-stride_norm/region_size_norm):.2f})')
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, 1)
+    ax1.set_aspect('equal')
+    ax1.grid(True, alpha=0.3)
+    
+    # 绘制所有透镜（半透明）
+    for i in range(M):
+        for j in range(M):
+            x_start = i * stride_norm
+            y_start = j * stride_norm
+            
+            if (i, j) == display_lens_idx:
+                # 高亮显示选定的透镜
+                rect = patches.Rectangle(
+                    (x_start, y_start), region_size_norm, region_size_norm,
+                    linewidth=2, edgecolor='red', facecolor='red', alpha=0.3
+                )
+                ax1.add_patch(rect)
+                ax1.text(x_start + region_size_norm/2, y_start + region_size_norm/2,
+                        f'L[{i},{j}]', ha='center', va='center', fontsize=13, fontweight='bold')
+            else:
+                # 其他透镜用淡蓝色
+                rect = patches.Rectangle(
+                    (x_start, y_start), region_size_norm, region_size_norm,
+                    linewidth=1, edgecolor='blue', facecolor='blue', alpha=0.1
+                )
+                ax1.add_patch(rect)
+    
+    # 绘制tiles边界
+    for tile in tiles:
+        rect = patches.Rectangle(
+            (tile['x_start_norm'], tile['y_start_norm']),
+            tile['x_end_norm'] - tile['x_start_norm'],
+            tile['y_end_norm'] - tile['y_start_norm'],
+            linewidth=1, edgecolor='black', facecolor='none'
+        )
+        ax1.add_patch(rect)
+        
+        # 在tile中心显示贡献透镜的数量
+        cx = (tile['x_start_norm'] + tile['x_end_norm']) / 2
+        cy = (tile['y_start_norm'] + tile['y_end_norm']) / 2
+        ax1.text(cx, cy, str(tile['num_lenses']), 
+                ha='center', va='center', fontsize=11, color='green')
+    
+    ax1.set_xlabel('Normalized X')
+    ax1.set_ylabel('Normalized Y')
+    
+    # 右图：显示mask分组
+    ax2.set_title(f'Tile Mask Groups ({mask_count} groups)')
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(0, 1)
+    ax2.set_aspect('equal')
+    ax2.grid(True, alpha=0.3)
+    
+    # 为每个mask组分配颜色
+    colors = plt.cm.get_cmap('tab10', mask_count)
+    
+    for tile in tiles:
+        rect = patches.Rectangle(
+            (tile['x_start_norm'], tile['y_start_norm']),
+            tile['x_end_norm'] - tile['x_start_norm'],
+            tile['y_end_norm'] - tile['y_start_norm'],
+            linewidth=1, edgecolor='black',
+            facecolor=colors(tile['group']), alpha=0.5
+        )
+        ax2.add_patch(rect)
+        
+        # 显示组号
+        cx = (tile['x_start_norm'] + tile['x_end_norm']) / 2
+        cy = (tile['y_start_norm'] + tile['y_end_norm']) / 2
+        ax2.text(cx, cy, str(tile['group']), 
+                ha='center', va='center', fontsize=11)
+    
+    ax2.set_xlabel('Normalized X')
+    ax2.set_ylabel('Normalized Y')
+    
+    # 添加图例
+    legend_elements = [patches.Patch(facecolor=colors(i), alpha=0.5, label=f'Group {i}') 
+                       for i in range(mask_count)]
+    ax2.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1))
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 打印统计信息
+    print(f"\nTile Statistics:")
+    print(f"Total tiles: {len(tiles)}")
+    print(f"Grid dimensions: {max(t['grid_kx'] for t in tiles)+1} x {max(t['grid_ky'] for t in tiles)+1}")
+    
+    # 统计每个组的tiles数量
+    group_counts = {i: 0 for i in range(mask_count)}
+    for tile in tiles:
+        group_counts[tile['group']] += 1
+    print(f"Tiles per group: {group_counts}")
+    
+    # 统计透镜贡献分布
+    lens_contributions = {}
+    for tile in tiles:
+        n = tile['num_lenses']
+        lens_contributions[n] = lens_contributions.get(n, 0) + 1
+    print(f"Lens contribution distribution: {lens_contributions}")
