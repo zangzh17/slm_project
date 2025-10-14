@@ -6,7 +6,7 @@ import numpy as np
 from scipy import ndimage
 import torch
 from scipy.ndimage import zoom
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from IPython.display import display, clear_output
@@ -513,3 +513,94 @@ def visualize_lenses_and_tiles(
         n = tile['num_lenses']
         lens_contributions[n] = lens_contributions.get(n, 0) + 1
     print(f"Lens contribution distribution: {lens_contributions}")
+
+
+def visualize_depth_psfs_and_masks(
+    depth_psfs: torch.Tensor,
+    depth_in_focus_ratio: List[float],
+    out_focus_masks: Optional[torch.Tensor] = None,
+    depth_out_focus_ratio: Optional[List[float]] = None,
+    figsize: tuple = (12, 4)
+):
+    """
+    可视化不同深度的PSF和离焦mask。
+    
+    Parameters
+    ----------
+    depth_psfs : torch.Tensor
+        深度PSF张量 [num_depths, N, N]
+    depth_in_focus_ratio : List[float]
+        焦内z_ratio列表
+    out_focus_masks : torch.Tensor, optional
+        离焦mask张量 [num_out_focus, M*M, N, N]
+    depth_out_focus_ratio : List[float], optional
+        焦外z_ratio列表
+    figsize : tuple
+        每行的图形大小
+    """
+    # 转换为numpy并移到CPU
+    depth_psfs_np = depth_psfs.cpu().numpy()
+    
+    # 确定绘图布局
+    has_masks = out_focus_masks is not None and depth_out_focus_ratio is not None
+    num_in_focus = len(depth_in_focus_ratio)
+    
+    if has_masks:
+        # 处理mask：沿M*M维度求和
+        out_focus_masks_np = out_focus_masks.sum(dim=1).cpu().numpy()  # [num_out_focus, N, N]
+        num_out_focus = len(depth_out_focus_ratio)
+        num_rows = max(num_in_focus, num_out_focus)
+        num_cols = 2
+    else:
+        num_rows = num_in_focus
+        num_cols = 1
+    
+    # 创建图形
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(figsize[0], figsize[1] * num_rows))
+    
+    # 确保axes是2D数组
+    if num_rows == 1 and num_cols == 1:
+        axes = np.array([[axes]])
+    elif num_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif num_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    # 绘制depth_psfs（对数scale）
+    for i in range(num_rows):
+        ax_psf = axes[i, 0]
+        
+        if i < num_in_focus:
+            # 绘制PSF（对数scale，避免log(0)）
+            psf = depth_psfs_np[i]
+            psf_log = np.log10(psf + 1e-10)  # 加小值避免log(0)
+            
+            im = ax_psf.imshow(psf_log, cmap='hot', origin='lower')
+            ax_psf.set_title(f'In-Focus PSF (z_ratio={depth_in_focus_ratio[i]:.3f})\nLog Scale')
+            ax_psf.set_xlabel('X (pixels)')
+            ax_psf.set_ylabel('Y (pixels)')
+            plt.colorbar(im, ax=ax_psf, label='log10(Intensity)')
+        else:
+            # 空白子图
+            ax_psf.axis('off')
+    
+    # 绘制out_focus_masks（线性scale）
+    if has_masks:
+        for i in range(num_rows):
+            ax_mask = axes[i, 1]
+            
+            if i < num_out_focus:
+                # 绘制mask sum（线性scale）
+                mask_sum = out_focus_masks_np[i]
+                
+                im = ax_mask.imshow(mask_sum, cmap='viridis', origin='lower')
+                ax_mask.set_title(f'Out-Focus Mask Sum (z_ratio={depth_out_focus_ratio[i]:.3f})\nLinear Scale')
+                ax_mask.set_xlabel('X (pixels)')
+                ax_mask.set_ylabel('Y (pixels)')
+                plt.colorbar(im, ax=ax_mask, label='Mask Count')
+            else:
+                # 空白子图
+                ax_mask.axis('off')
+    
+    plt.tight_layout()
+    plt.show()

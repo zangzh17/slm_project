@@ -27,7 +27,7 @@ OPTIMIZED_DEFAULTS = {
     'overlap_ratio': 0.3,
     'dof_correction': 1.0,
     'airy_correction': 1.0,
-    'center_blend': 0.0,
+    'center_blend': 0.0,       # 0：焦点采用原生均匀分布；1：考虑重叠后的中心
     'interleaving' : 'coarse1',
     'mask_count': 2,
     'psf_energy_level': 1.0,
@@ -39,8 +39,8 @@ OPTIMIZED_DEFAULTS = {
 # 优化器内部参数 (non-UI)
 INTERNAL = {
     'depth_in_focus': [-1.0, 1.0],
-    # 'depth_out_focus': [-5.0] 
-    'depth_out_focus': None
+    'depth_out_focus': [0.9, 0.75,0.5,0.25, 0.01] 
+    # 'depth_out_focus': None
 }
 
 # ROI默认设置 (方形)

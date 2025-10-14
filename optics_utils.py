@@ -156,9 +156,11 @@ def compute_psf_centers(
     CY_blended = (1.0 - t_blend) * CY_uniform + t_blend * CY_overlap
     
     # 根据z_ratio进一步插值（控制传播距离）
+    # z_ratio = 0，考虑重叠的透镜中心
+    # z_ratio = 1，考虑混合的焦平面分布
     z_ratio = float(max(0.0, min(1.0, z_ratio)))
-    CX_final = (1.0 - z_ratio) * CX_uniform + z_ratio * CX_blended
-    CY_final = (1.0 - z_ratio) * CY_uniform + z_ratio * CY_blended
+    CX_final = (1.0 - z_ratio) * CX_overlap + z_ratio * CX_blended
+    CY_final = (1.0 - z_ratio) * CY_overlap + z_ratio * CY_blended
     CX_final = CX_final.clamp(0.0, 1.0)
     CY_final = CY_final.clamp(0.0, 1.0)
     
@@ -298,7 +300,7 @@ def generate_tile_masks(
         print(f'Use {coarse_grid_size} instead.')
     
     # 获取几何参数
-    center_info = compute_psf_centers(M, overlap_ratio, center_blend, z_ratio=1.0, N=N, device=device)
+    center_info = compute_psf_centers(M, overlap_ratio, center_blend, N=N, device=device)
     region_size_norm = center_info['region_size_norm']
     stride_norm = center_info['stride_norm']
     scale = center_info['scale']

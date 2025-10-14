@@ -15,6 +15,7 @@ from collections import defaultdict
 from optics_utils import create_checkerboard
 from optics_utils import compute_psf_centers, generate_tile_masks, generate_gaussian_psf
 from optics_utils import generate_lens_circular_masks
+from visualization import visualize_depth_psfs_and_masks
         
 import wave_propagation as wp
 import math
@@ -40,8 +41,9 @@ class PhaseGenerator:
         self.lr = params['lr']
         self.device = device
         print(f"Using device: {self.device}")
-        self.depth_in_focus = params['depth_in_focus']
-        self.depth_out_focus = params['depth_out_focus']
+
+        self.depth_in_focus_dof = params['depth_in_focus']
+        self.depth_out_focus_ratio = params['depth_out_focus']
         
         # simple calculations for other parameters
         self.L = None
@@ -49,7 +51,9 @@ class PhaseGenerator:
         self.f_number = None
         self.depth_of_focus = None
         self.airy_radius = None
-        self._update_parameters()
+        self.depth_in_focus_ratio = None
+        self.depth_in_focus = None
+        self._update_parameters(verbose=True)
         
         # Results (set after generate)
         self.phase = None
@@ -74,7 +78,7 @@ class PhaseGenerator:
         """
         if N is None:
             N = self.N
-        print(N, self.M)
+        print(f"Fresnel Lens: {N}x{N} px; {self.M}x{self.M} lenses")
         y, x = np.indices((N, N))
         phase = np.zeros((N, N))
         for r in range(self.M):
@@ -97,6 +101,7 @@ class PhaseGenerator:
     def forward(self, U_in=None, z=None, upsampling=1.0) -> torch.Tensor:
         """
         Single forward propagation process. 
+        z may be a list or scalar
         """
         if self.phase_param is None:
             raise ValueError("Phase parameter not set. Run generate('optimized') first.")
@@ -213,7 +218,7 @@ class PhaseGenerator:
         self._post_process_phase()
     
     
-    def _update_parameters(self,mode='fresnel'):
+    def _update_parameters(self,mode='fresnel',verbose=False):
         # simple calculations
         self.L = self.N * self.pixel_size
         # Geometry with or w/o overlap
@@ -222,22 +227,45 @@ class PhaseGenerator:
             self.f_number = self.focal_length / self.lens_width
             self.depth_of_focus = 2*self.wavelength*self.f_number**2 
             self.airy_radius = 1.22*self.wavelength*self.f_number
+            if verbose:
+                print(f"F/{self.f_number:.2f}, {self.focal_length*1e3} mm")
+                print(f"Lens width: {self.lens_width*1.0e3:.3f}mm")
+                print(f"Airy radius: {self.airy_radius*1.0e6:.1f}um")
+                print(f"Depth of focus: {self.depth_of_focus*1.0e3:.2f}mm")
         elif mode == 'optimized':
             region_size_norm = 1.0 / (self.M - (self.M - 1) * self.overlap_ratio)
             self.lens_width = self.L * region_size_norm
             self.f_number = self.focal_length / self.lens_width 
             self.depth_of_focus = 2*self.wavelength*self.f_number**2
             self.airy_radius = 1.22*self.wavelength*self.f_number
+            if verbose:
+                print(f"F/{self.f_number:.2f}, {self.focal_length*1e3} mm")
+                print(f"Eff. Lens width: {self.lens_width*1.0e3:.3f}mm")
+                print(f"Airy radius: {self.airy_radius*1.0e6:.1f}um")
+                print(f"Depth of focus: {self.depth_of_focus*1.0e3:.2f}mm")
         
-        if self.depth_in_focus is None:
-            self.depth_in_focus = self.focal_length
+        if self.depth_in_focus_dof is None:
+            self.depth_in_focus_ratio = None
+            self.depth_in_focus = None
+            if verbose:
+                print(f"Single depth plane is used at F={self.focal_length*1.0e3:.1f} mm")
         else:
+            # self.depth_in_focus_ratio: 
+            # convert to ratio (divided by focal length)
             self.depth_in_focus = [self.focal_length + d*self.depth_of_focus*self.dof_correction
-                                    for d in self.depth_in_focus]
+                                    for d in self.depth_in_focus_dof]
             
-        if self.depth_out_focus is not None:
-            self.depth_out_focus = [self.focal_length + d*self.depth_of_focus*self.dof_correction
-                                    for d in self.depth_out_focus]
+            self.depth_in_focus_ratio = [d/self.focal_length
+                                   for d in self.depth_in_focus]
+            if verbose:
+                print(f"Multi-depth planes are used at F={', '.join(f'{x*1.0e3:.1f} ({y:.1f}DOF)' for x,y in zip(self.depth_in_focus,self.depth_in_focus_dof))} mm")
+        
+        if (self.depth_out_focus_ratio is not None) and verbose:
+            # already been ratio (divided by focal length)
+            depth_out_focus_m = [self.focal_length * d
+                                    for d in self.depth_out_focus_ratio]
+            print(f"Out-of-focus planes are used at Z={', '.join(f'{x*1.0e3:.1f} ({y:.2f}x)' for x,y in zip(depth_out_focus_m, self.depth_out_focus_ratio))} mm")
+        
     
     def _optimize_phase(self, 
                         init_phase: torch.Tensor = None, 
@@ -298,28 +326,39 @@ class PhaseGenerator:
         """
         准备优化模板
         使用类参数：
-        - self.depth_in_focus: z_ratio列表，用于生成depth_psfs
-        - self.depth_out_focus: z_ratio列表，用于生成离焦中心坐标
+        - self.depth_in_focus_ratio: z_ratio列表，用于生成depth_psfs
+        - self.depth_out_focus_ratio: z_ratio列表，用于生成离焦中心坐标
         """
         N_up = int(self.N * upsampling)
         
-        # 上采样版本，生成in-focus的多平面PSF（包含depth_psfs）
+        # 0. 非上采样版本，生成in-focus的多平面PSF（包含depth_psfs）
+        results = self._create_gaussian_template(
+            upsampling=1.0,
+            visualize=False,
+            z_ratios=self.depth_in_focus_ratio
+        )
+        self.total_psfs = results['total_psfs']
+        self.centers_pixel = results['centers_pixel']
+
+        # 1. 上采样版本，生成in-focus的多平面PSF（包含depth_psfs）
         results = self._create_gaussian_template(
             upsampling=upsampling,
             visualize=visualize,
-            z_ratios=self.depth_in_focus
+            z_ratios=self.depth_in_focus_ratio
         )
         self.mask_psfs_up = results['mask_psfs'] * self.psf_energy_level
         self.total_psfs_up = results['total_psfs'] * self.psf_energy_level
         self.depth_psfs_up = results['depth_psfs'] * self.psf_energy_level  # [num_depths, N, N]
         self.centers_pixel_up = results['centers_pixel']
         masks = results['masks']
+        # Incident modulation for optimization
+        self.U_masked = masks.to(device=self.device, dtype=torch.complex64)
         
-        # 上采样版本，out-of-focus中心和mask
-        if self.depth_out_focus is not None:
+        # 2. 上采样版本，out-of-focus中心和mask
+        if self.depth_out_focus_ratio is not None:
             # 生成out-of-focus的中心坐标（仅坐标，不需要PSF）
             centers_out_focus_list = []
-            for z_ratio in self.depth_out_focus:
+            for z_ratio in self.depth_out_focus_ratio:
                 center_info = compute_psf_centers(
                     M=self.M,
                     overlap_ratio=self.overlap_ratio,
@@ -336,28 +375,30 @@ class PhaseGenerator:
             region_size_norm = 1.0 / (self.M - (self.M - 1) * self.overlap_ratio)
             lens_width_px_up = region_size_norm * (N_up - 1)
             radii_up = torch.tensor(
-                [lens_width_px_up * z / 2.0 for z in self.depth_out_focus],
+                [lens_width_px_up * (1.0-z) / 2.0 for z in self.depth_out_focus_ratio],
                 device=self.device,
                 dtype=torch.float32
             )
+            # [num_out_focus, M*M, N_up, N_up]
             self.out_focus_masks_up = generate_lens_circular_masks(
                 centers_pixel=self.centers_pixel_out_focus_up,
                 radii_pixels=radii_up,
                 N=N_up,
                 device=self.device
             )
+            
+        if visualize:
+            out_focus_masks = self.out_focus_masks_up if self.depth_out_focus_ratio is not None else None
+            depth_out_focus_ratio = self.depth_out_focus_ratio if self.depth_out_focus_ratio is not None else None
 
-        # 非上采样版本，生成in-focus的PSF（包含depth_psfs）
-        results = self._create_gaussian_template(
-            upsampling=1.0,
-            visualize=False,
-            z_ratios=self.depth_in_focus
-        )
-        self.total_psfs = results['total_psfs']
-        self.centers_pixel = results['centers_pixel']
-
-        # Incident modulation for optimization
-        self.U_masked = masks.to(device=self.device, dtype=torch.complex64)
+            visualize_depth_psfs_and_masks(
+                depth_psfs=self.depth_psfs_up,
+                depth_in_focus_ratio=self.depth_in_focus_ratio,
+                out_focus_masks=out_focus_masks,
+                depth_out_focus_ratio=depth_out_focus_ratio,
+                figsize=(12, 4)
+            )
+        
 
     def _create_gaussian_template(
         self,
@@ -414,18 +455,18 @@ class PhaseGenerator:
         tiles = mask_info['tiles']
         a_lens_mask = mask_info['a_lens_mask']
         
-        # 2. 计算z_ratio=0时的PSF中心
+        # 2. 计算z_ratio=1.0 时的PSF中心
         center_info_z0 = compute_psf_centers(
             M=self.M,
             overlap_ratio=self.overlap_ratio,
             center_blend=self.center_blend,
-            z_ratio=0.0,
+            z_ratio=1.0,
             N=N,
             device=self.device
         )
         centers_pixel_z0 = center_info_z0['centers_pixel']
         
-        #  计算z_ratio=0时的PSF
+        #  计算z_ratio=1时的PSF
         psf_result_z0 = generate_gaussian_psf(
             centers_pixel=centers_pixel_z0,
             N=N,

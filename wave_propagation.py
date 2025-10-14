@@ -89,51 +89,41 @@ def prop(field, H, pad_x, init_wavefront=None, pad_val=0):
     使用ASM或RSC方法传播光场
     
     参数:
-        field: 输入复场 [N,N] 或 [B,N,N]
-        H: 传播核函数（从ASM_Kernel获得）
+        field: 输入复场 [B, N, N]，B >= 1
+        H: 传播核函数 [B_h, N_pad, N_pad]
         pad_x: 每边填充的像素数
         init_wavefront: 初始波前（可选）
         pad_val: 填充值（默认为0）或"circular"表示循环填充
         
     返回:
-        torch.Tensor: 传播后的场
+        torch.Tensor: 传播后的场 [B_out, N, N]
     """
-    # 检查输入维度并统一处理
-    is_batch = field.dim() == 3
-    if not is_batch:
-        field = field.unsqueeze(0)  # 添加batch维度 [1, N, N]
-    
     # 获取场的尺寸
     B, Ny, Nx = field.shape
     
     # 填充
     if pad_val == "circular":
-        # pad只对最后两个维度进行填充
         field_pad = torch.nn.functional.pad(field, (pad_x, pad_x, pad_x, pad_x), mode='circular')
     else:
         field_pad = torch.nn.functional.pad(field, (pad_x, pad_x, pad_x, pad_x), mode='constant', value=pad_val)
     
     # 应用初始波前（如果提供）
     if init_wavefront is not None:
-        # 如果init_wavefront是2D的，需要扩展到匹配batch维度
         if init_wavefront.dim() == 2:
             init_wavefront = init_wavefront.unsqueeze(0).expand(B, -1, -1)
         field_pad = field_pad * init_wavefront
     
     # 计算ASM/RSC
-    # fft2和ifft2会自动处理batch维度（对最后两个维度进行操作）
     field_pad_FT = torch.fft.fftshift(torch.fft.fft2(torch.fft.fftshift(field_pad, dim=(-2, -1))), dim=(-2, -1))
-    # H需要广播到batch维度
+    
+    # H广播到batch维度（如果需要）
     if H.dim() == 2:
-        H = H.unsqueeze(0)  # [1, Ny_pad, Nx_pad]
+        H = H.unsqueeze(0)
+    
     field_pro = torch.fft.ifftshift(torch.fft.ifft2(torch.fft.ifftshift(field_pad_FT * H, dim=(-2, -1))), dim=(-2, -1))
     
     # 移除填充
     field_result = field_pro[:, pad_x:pad_x+Ny, pad_x:pad_x+Nx]
-    
-    # 如果输入不是batch，移除batch维度
-    if not is_batch:
-        field_result = field_result.squeeze(0)
     
     return field_result
 
@@ -143,32 +133,50 @@ def propagate_ASM(field, z, L, wavelength, device=None):
     
     参数:
         field: 输入复场 [N,N] 或 [B,N,N]
-        z: 传播距离（米）
+        z: 传播距离（米），标量或列表
         L: 计算区域尺寸（米）
         wavelength: 波长（米）
         device: PyTorch设备
         
     返回:
-        torch.Tensor: 传播后的场
+        torch.Tensor: 传播后的场 [N,N] 或 [B,N,N] 或 [num_z, N, N]，取决于输入
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 获取场的尺寸
-    if field.dim() == 2:
-        N = field.shape[0]  # [N, N]
-    else:
-        N = field.shape[1]  # [B, N, N]
+    field = field.to(device)
     
-    # 生成传播核函数
-    H_list, N_pad = ASM_Kernel([z], L, wavelength, N, device)
-    H = H_list[0]  # 只使用一个z值的核函数
+    # 处理z和field的维度
+    original_batch = field.dim() == 3
+    num_z = 1
+    if isinstance(z, list):
+        assert field.dim() == 2, "When z is a list, field must be [N, N]"
+        field = field.unsqueeze(0)
+        z_list = z
+        num_z = len(z)
+    else:
+        z_list = [z]
+        if not original_batch:
+            field = field.unsqueeze(0)
+    
+    # 获取原始尺寸
+    N = field.shape[-1]
+    
+    # 生成传播核函数列表
+    H_list, N_pad = ASM_Kernel(z_list, L, wavelength, N, device)
+    H = torch.stack(H_list, dim=0)  # [num_z, N_pad, N_pad]
     
     # 计算填充大小
     pad_x = int((N_pad - N) / 2)
     
     # 执行传播
-    return prop(field, H, pad_x)
+    result = prop(field, H, pad_x)
+    
+    # 如果输入是2D且z是标量，挤压batch维度
+    if not original_batch and num_z == 1:
+        result = result.squeeze(0)
+    
+    return result
 
 def create_grid(L, N, device=None):
     """
