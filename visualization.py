@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from IPython.display import display, clear_output
 from optics_utils import calculate_airy_disk
+from optics_utils import compute_psf_centers
 
 def plot_live_update(iteration: int, total_iterations: int, loss: float, optimizer):
     """Display and update images in real-time during optimization."""
@@ -257,96 +258,181 @@ def plot_cross_sections(optimizer,upsampling=1.0):
     plt.show()
 
 
-def plot_energy_distribution(optimizer,upsampling=1.0):
+def plot_energy_distribution(optimizer, upsampling=1.0):
     """
     可视化衍射透镜阵列中所有焦斑的聚焦效率（相对比例）。
-
-    1. 从理想模板(total_psfs)中定位所有焦斑的中心。
-    2. 计算圈入能量的计算半径。
-    3. 在优化后的实际光强图中，为每个焦斑计算圈入能量。
-    4. 将圈入能量除以理论分配能量，得到效率比例。
-    5. 绘制柱状图展示效率分布，并标注统计数据。
+    
+    使用精确的几何中心位置计算每个焦斑的圈入能量效率。
+    
+    Parameters
+    ----------
+    optimizer : PhaseOptimizer
+        优化器对象，包含所有必要的参数和方法
+    upsampling : float
+        上采样因子，用于更精确的能量计算
+        
+    Notes
+    -----
+    该函数执行以下步骤：
+    1. 使用compute_psf_centers获取精确的焦斑中心位置
+    2. 根据Airy半径计算圈入能量的半径
+    3. 在优化后的光强图中为每个焦斑计算圈入能量
+    4. 将圈入能量除以理论分配能量，得到效率比例
+    5. 绘制柱状图展示效率分布，并标注统计数据
     """
-    N_up = optimizer.N * upsampling
+    N_up = int(optimizer.N * upsampling)
     pixel_size_up = optimizer.pixel_size / upsampling
     
     with torch.no_grad():
-        I_opt = optimizer.forward(upsampling=upsampling).cpu().numpy()
-        tgt_psfs = optimizer.total_psfs.cpu().numpy()
-        tgt_psfs_up = zoom(tgt_psfs, zoom=upsampling, order=0)
-
-
-    # --- 步骤 1: 定位焦斑中心 (与之前相同) ---
-    threshold = tgt_psfs_up.max() * 0.5
-    binary_mask = tgt_psfs_up > threshold
-    labeled_array, num_features = ndimage.label(binary_mask)
-    centers = ndimage.center_of_mass(tgt_psfs_up, labeled_array, range(1, num_features + 1))
+        # 获取优化后的光强分布
+        I_opt = optimizer.forward(z=optimizer.focal_length, upsampling=upsampling).cpu().numpy()
     
-    expected_spots = optimizer.M * optimizer.M
-    if num_features != expected_spots:
-        print(f"Warning: Found {num_features} spots, but expected {expected_spots}.")
-
-    # --- 步骤 2: 计算半径 (与之前相同) ---
-    radius_meters = 1.22 * optimizer.wavelength * optimizer.f_number
+    # ========== 步骤 1: 使用精确的几何中心 ==========
+    center_info = compute_psf_centers(
+        M=optimizer.M,
+        overlap_ratio=optimizer.overlap_ratio,
+        center_blend=optimizer.center_blend,
+        z_ratio=1.0,  # 焦平面
+        N=N_up,
+        device=optimizer.device
+    )
+    centers_pixel = center_info['centers_pixel'].cpu().numpy()  # [M*M, 2]
+    
+    num_spots = centers_pixel.shape[0]
+    print(f"\n{'='*60}")
+    print(f"Focusing Efficiency Analysis")
+    print(f"{'='*60}")
+    print(f"Number of focal spots: {num_spots} (M={optimizer.M}x{optimizer.M})")
+    
+    # ========== 步骤 2: 计算半径 ==========
+    # 使用airy半径和校正因子
+    radius_meters = optimizer.airy_radius
     radius_pixels = radius_meters / pixel_size_up
     
-    print(f"Encircled energy radius used for calculation: {radius_pixels:.2f} pixels")
-
-    # --- 步骤 3: 计算圈入能量 (与之前相同) ---
+    print(f"\nEncircled Energy Calculation:")
+    print(f"  Radius: {radius_pixels:.2f} pixels = {radius_meters*1e6:.1f} μm")
+    
+    # ========== 步骤 3: 计算圈入能量 ==========
     encircled_energies = []
     Y, X = np.ogrid[:N_up, :N_up]
     
-    for center_y, center_x in centers:
+    for i in range(num_spots):
+        center_x = centers_pixel[i, 0]
+        center_y = centers_pixel[i, 1]
+        
+        # 计算到中心的距离
         dist_sq = (X - center_x)**2 + (Y - center_y)**2
         mask = dist_sq <= radius_pixels**2
+        
+        # 计算圈内能量
         energy = I_opt[mask].sum()
         encircled_energies.append(energy)
-        
+    
     abs_energies = np.array(encircled_energies)
-
-    # --- 步骤 4: 计算效率比例并进行统计 ---
-    # 计算理论上分配给单个焦点的总能量
+    
+    # ========== 步骤 4: 计算效率比例 ==========
+    # 理论上分配给单个焦点的总能量
     ideal_energy_per_spot = (N_up * N_up) / (optimizer.M * optimizer.M)
     
-    # 防止除以零的错误
-    if ideal_energy_per_spot == 0:
-        print("Error: Ideal energy per spot is zero. Cannot calculate efficiency.")
-        return
-        
     # 计算效率（每个焦斑的圈入能量 / 理论分配的总能量）
     efficiencies = abs_energies / ideal_energy_per_spot
-    
-    # 将效率转换为百分比进行显示
     efficiencies_percent = efficiencies * 100
     
+    # 统计信息
     mean_eff = efficiencies_percent.mean()
     max_eff = efficiencies_percent.max()
     min_eff = efficiencies_percent.min()
     std_eff = efficiencies_percent.std()
+    median_eff = np.median(efficiencies_percent)
     
-    # --- 步骤 5: 可视化 ---
-    plt.figure(figsize=(16, 8))
+    # 找出最高和最低效率的焦斑
+    max_idx = np.argmax(efficiencies_percent)
+    min_idx = np.argmin(efficiencies_percent)
+    
+    # print(f"\nEfficiency Statistics:")
+    # print(f"  Mean:   {mean_eff:.2f}%")
+    # print(f"  Median: {median_eff:.2f}%")
+    # print(f"  Std:    {std_eff:.2f}%")
+    # print(f"  Range:  [{min_eff:.2f}%, {max_eff:.2f}%]")
+    # print(f"  Max efficiency at spot #{max_idx}")
+    # print(f"  Min efficiency at spot #{min_idx}")
+    # print(f"{'='*60}\n")
+    
+    # ========== 步骤 5: 可视化 ==========
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+    
+    # --- 左图：柱状图 ---
     spot_indices = np.arange(len(efficiencies_percent))
-    plt.bar(spot_indices, efficiencies_percent, color='darkcyan', label='Focusing Efficiency per Spot')
+    bars = ax1.bar(spot_indices, efficiencies_percent, color='darkcyan', 
+                   label='Focusing Efficiency', alpha=0.8, edgecolor='black', linewidth=0.5)
     
-    # 更新统计信息文本
+    # 高亮最高和最低效率的焦斑
+    bars[max_idx].set_color('green')
+    bars[max_idx].set_alpha(1.0)
+    bars[min_idx].set_color('red')
+    bars[min_idx].set_alpha(1.0)
+    
+    # 添加平均线和标准差区域
+    ax1.axhline(y=mean_eff, color='blue', linestyle='--', linewidth=2, 
+                label=f'Mean: {mean_eff:.2f}%', zorder=3)
+    ax1.axhspan(mean_eff - std_eff, mean_eff + std_eff, 
+                alpha=0.2, color='blue', label=f'±1 Std: {std_eff:.2f}%')
+    
+    # 统计信息文本
     stats_text = (f'Total Spots: {len(efficiencies_percent)}\n'
-                  f'Mean Efficiency: {mean_eff:.2f}%\n'
-                  f'Max Efficiency: {max_eff:.2f}%\n'
-                  f'Min Efficiency: {min_eff:.2f}%\n'
-                  f'Std Dev: {std_eff:.2f}%')
-                  
-    plt.text(0.98, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=12,
+                  f'Mean: {mean_eff:.2f}%\n'
+                  f'Median: {median_eff:.2f}%\n'
+                  f'Std Dev: {std_eff:.2f}%\n'
+                  f'Max: {max_eff:.2f}% (#{max_idx})\n'
+                  f'Min: {min_eff:.2f}% (#{min_idx})\n'
+                  f'Radius: {radius_pixels:.2f} px')
+    
+    ax1.text(0.98, 0.95, stats_text, transform=ax1.transAxes, fontsize=11,
              verticalalignment='top', horizontalalignment='right',
-             bbox=dict(boxstyle='round,pad=0.5', fc='lightgoldenrodyellow', alpha=0.6))
-             
-    plt.title('Focusing Efficiency Distribution of Focal Spots', fontsize=16)
-    plt.xlabel('Focal Spot Index', fontsize=12)
-    plt.ylabel('Focusing Efficiency (%)', fontsize=12)
-    plt.legend(loc='upper left')
-    plt.grid(axis='y', linestyle=':', alpha=0.7)
-    # 根据数据范围设置一个合适的Y轴，例如0到最大效率的1.2倍
-    plt.ylim(0, max(110, np.max(efficiencies_percent) * 1.2)) 
+             bbox=dict(boxstyle='round,pad=0.5', fc='lightgoldenrodyellow', alpha=0.9))
+    
+    ax1.set_title('Focusing Efficiency Distribution', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Focal Spot Index', fontsize=12)
+    ax1.set_ylabel('Focusing Efficiency (%)', fontsize=12)
+    ax1.legend(loc='upper left', fontsize=10)
+    ax1.grid(axis='y', linestyle=':', alpha=0.7)
+    ax1.set_ylim(0, max(110, np.max(efficiencies_percent) * 1.2))
+    
+    # --- 右图：2D效率分布热力图 ---
+    efficiencies_2d = efficiencies_percent.reshape(optimizer.M, optimizer.M)
+    
+    im = ax2.imshow(efficiencies_2d, cmap='viridis', origin='lower', 
+                    aspect='auto', interpolation='nearest')
+    
+    # 添加数值标注
+    for i in range(optimizer.M):
+        for j in range(optimizer.M):
+            text = ax2.text(j, i, f'{efficiencies_2d[i, j]:.1f}',
+                           ha="center", va="center", color="white", fontsize=8,
+                           fontweight='bold')
+    
+    # 标记最高和最低
+    max_i, max_j = max_idx // optimizer.M, max_idx % optimizer.M
+    min_i, min_j = min_idx // optimizer.M, min_idx % optimizer.M
+    
+    ax2.plot(max_j, max_i, 'g*', markersize=20, markeredgecolor='white', 
+             markeredgewidth=2, label='Max')
+    ax2.plot(min_j, min_i, 'r*', markersize=20, markeredgecolor='white', 
+             markeredgewidth=2, label='Min')
+    
+    ax2.set_title('Efficiency Map (2D Layout)', fontsize=14, fontweight='bold')
+    ax2.set_xlabel('Lens Column', fontsize=12)
+    ax2.set_ylabel('Lens Row', fontsize=12)
+    ax2.legend(loc='upper right', fontsize=10)
+    
+    # 添加colorbar
+    cbar = plt.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+    cbar.set_label('Efficiency (%)', fontsize=11)
+    
+    # 设置刻度
+    ax2.set_xticks(range(optimizer.M))
+    ax2.set_yticks(range(optimizer.M))
+    
     plt.tight_layout()
     plt.show()
 
