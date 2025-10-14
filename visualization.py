@@ -8,6 +8,7 @@ import torch
 from scipy.ndimage import zoom
 from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 from IPython.display import display, clear_output
 from optics_utils import calculate_airy_disk
@@ -193,23 +194,28 @@ def plot_2d_comparisons(optimizer):
             intensity_map_3 = compute_propagation_map(config["U_in"], z_range_2, optimizer)
             
             # Convert to relative distance in micrometers
-            z_range_2_relative_um = (z_range_2 - config["focal_dist"]).numpy() * 1e6  # Convert to μm
+            z_range_2_relative_mm = (z_range_2 - config["focal_dist"]).numpy() * 1e3  # Convert to mm
             
 
             im4 = axes[3].imshow(intensity_map_3, cmap='hot', 
                                 aspect='auto', extent=[0, intensity_map_3.shape[1], 
-                                                      z_range_2_relative_um[-1], 
-                                                      z_range_2_relative_um[0]])
+                                                      z_range_2_relative_mm[-1], 
+                                                      z_range_2_relative_mm[0]])
             
             axes[3].set_title('Around Focal (±4×DOF)', fontsize=10)
             axes[3].set_xlabel('Y Position', fontsize=9)
-            axes[3].set_ylabel('Δz (μm)', fontsize=9)
+            axes[3].set_ylabel('Δz (mm)', fontsize=9)
             axes[3].tick_params(axis='both', labelsize=8)
             cbar4 = plt.colorbar(im4, ax=axes[3], shrink=0.7, pad=0.02)
             cbar4.set_label('log₁₀(I)', fontsize=9)
             cbar4.ax.tick_params(labelsize=8)
             # Add a horizontal line at focal plane (z=0) for reference
-            axes[3].axhline(y=0, color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+            axes[3].axhline(y=0, color='white', linestyle='-', linewidth=0.5)
+            # Add horizontal line at ±DOF/2, ±DOF for reference
+            axes[3].axhline(y=optimizer.depth_of_focus/2 *1e3, color='white', linestyle='--', linewidth=1, alpha=0.5)
+            axes[3].axhline(y=-optimizer.depth_of_focus/2 *1e3, color='white', linestyle='--', linewidth=1, alpha=0.5)
+            axes[3].axhline(y=optimizer.depth_of_focus *1e3, color='white', linestyle='--', linewidth=1, alpha=0.5)
+            axes[3].axhline(y=-optimizer.depth_of_focus *1e3, color='white', linestyle='--', linewidth=1, alpha=0.5)
             
             plt.tight_layout()
             plt.show()
@@ -400,25 +406,31 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
     
     # --- 右图：2D效率分布热力图 ---
     efficiencies_2d = efficiencies_percent.reshape(optimizer.M, optimizer.M)
-    
-    im = ax2.imshow(efficiencies_2d, cmap='viridis', origin='lower', 
+    # 获取colormap的前 0.4 部分
+    cmap = plt.get_cmap('gist_heat')
+    colors = cmap(np.linspace(0, 0.4, 256))
+    cmap = mcolors.ListedColormap(colors)
+
+    im = ax2.imshow(efficiencies_2d, cmap=cmap, origin='lower', 
                     aspect='auto', interpolation='nearest')
-    
-    # 添加数值标注
-    for i in range(optimizer.M):
-        for j in range(optimizer.M):
-            text = ax2.text(j, i, f'{efficiencies_2d[i, j]:.1f}',
-                           ha="center", va="center", color="white", fontsize=8,
-                           fontweight='bold')
     
     # 标记最高和最低
     max_i, max_j = max_idx // optimizer.M, max_idx % optimizer.M
     min_i, min_j = min_idx // optimizer.M, min_idx % optimizer.M
-    
-    ax2.plot(max_j, max_i, 'g*', markersize=20, markeredgecolor='white', 
-             markeredgewidth=2, label='Max')
-    ax2.plot(min_j, min_i, 'r*', markersize=20, markeredgecolor='white', 
-             markeredgewidth=2, label='Min')
+    # 添加数值标注
+    for i in range(optimizer.M):
+        for j in range(optimizer.M):
+            if i==max_i and j==max_j:
+                text = ax2.text(j, i, f'{efficiencies_2d[i, j]:.0f}',
+                            ha="center", va="center", color="Blue", fontsize=13,
+                            fontweight='bold')
+            elif i==min_i and j==min_j:
+                text = ax2.text(j, i, f'{efficiencies_2d[i, j]:.0f}',
+                            ha="center", va="center", color="Green", fontsize=13,
+                            fontweight='bold')
+            else:
+                text = ax2.text(j, i, f'{efficiencies_2d[i, j]:.0f}',
+                            ha="center", va="center", color="White", fontsize=12)
     
     ax2.set_title('Efficiency Map (2D Layout)', fontsize=14, fontweight='bold')
     ax2.set_xlabel('Lens Column', fontsize=12)

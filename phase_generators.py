@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import textwrap
 import os
 import time
 import config
@@ -39,6 +40,7 @@ class PhaseGenerator:
         self.interleaving = params['interleaving']
         self.ni = params['ni']
         self.lr = params['lr']
+        self.show_iters = params['show_iters']
         self.device = device
         print(f"Using device: {self.device}")
 
@@ -126,7 +128,21 @@ class PhaseGenerator:
         return torch.abs(U_focal)**2
     
     def compute_loss(self, upsampling=1.0) -> tuple[torch.Tensor, dict]:
-        """Compute losses"""
+        """
+        Compute losses including focal plane, depth planes, and out-of-focus centroid losses.
+        
+        Parameters
+        ----------
+        upsampling : float
+            Upsampling factor for high-resolution evaluation
+            
+        Returns
+        -------
+        total_loss : torch.Tensor
+            Combined weighted loss
+        loss_components : dict
+            Individual loss component values for monitoring
+        """
         if upsampling != 1.0:
             N = int(self.N * upsampling)
             pixel_size = self.L/N
@@ -135,46 +151,118 @@ class PhaseGenerator:
             pixel_size = self.pixel_size
             
         loss_fn = nn.MSELoss()
+        loss_components = {}
+        loss_terms = []
         
-        # MSE loss for focal plane
+        # ========== 1. MSE loss for focal plane ==========
         I_focal_full = self.forward(z=self.focal_length, upsampling=upsampling)
         mse = loss_fn(I_focal_full, self.total_psfs_up)
+        loss_terms.append(mse)
+        loss_components['focal_mse'] = mse.item()
 
-        # Depth MES Loss for in-focus planes
+        # ========== 2. Depth MSE Loss for in-focus planes ==========
+        if hasattr(self, 'depth_in_focus_ratio') and self.depth_in_focus_ratio is not None:
+            # Use depth_in_focus_ratio if available
+            z_list = [self.focal_length * ratio for ratio in self.depth_in_focus_ratio]
+        else:
+            z_list = None
 
-        # Centroid loss for out-focus planes 
-        # (Regional centroid deviation from geo. centers pixel)
+        if z_list is not None:
+            # Forward propagate to multiple depths (returns [num_depths, N, N])
+            I_depth_planes = self.forward(z=z_list, upsampling=upsampling)
+            
+            # Compute MSE with target depth PSFs
+            depth_mse = loss_fn(I_depth_planes, self.depth_psfs_up)
+            loss_terms.append(depth_mse)
+            loss_components['depth_mse'] = depth_mse.item()
         
-        # Average focusing efficiency loss for focal plane
-        x_grid, y_grid = torch.meshgrid(torch.arange(N, device=self.device),
-                                        torch.arange(N, device=self.device),
-                                        indexing='ij')
+        # ========== 3. Centroid loss for out-of-focus planes ==========
+        if hasattr(self, 'depth_out_focus_ratio') and self.depth_out_focus_ratio is not None:
+            # Propagate to out-of-focus depths
+            z_out_list = [self.focal_length * ratio for ratio in self.depth_out_focus_ratio]
+            I_out_focus_planes = self.forward(z=z_out_list, upsampling=upsampling)  # [num_out, N, N]
+            
+            num_out_focus = len(z_out_list)
+            num_lenses = self.M * self.M
+            
+            # Create coordinate grids
+            y_grid, x_grid = torch.meshgrid(
+                torch.arange(N, device=self.device, dtype=torch.float32),
+                torch.arange(N, device=self.device, dtype=torch.float32),
+                indexing='ij'
+            )
+            
+            centroid_distances = []
+            
+            for i in range(num_out_focus):
+                I_plane = I_out_focus_planes[i]  # [N, N]
+                
+                for j in range(num_lenses):
+                    # Get mask for this depth and lens
+                    mask = self.out_focus_masks_up[i, j]  # [N, N]
+                    
+                    # Extract intensity values within mask
+                    I_masked = I_plane * mask  # [N, N]
+                    total_intensity = I_masked.sum()
+                    
+                    # Compute centroid (weighted average position)
+                    centroid_x = (I_masked * x_grid).sum() / total_intensity
+                    centroid_y = (I_masked * y_grid).sum() / total_intensity
+                    
+                    # Target center position
+                    target_x = self.centers_pixel_out_focus_up[i, j, 0]
+                    target_y = self.centers_pixel_out_focus_up[i, j, 1]
+                    
+                    # Euclidean distance
+                    distance = torch.sqrt((centroid_x - target_x) ** 2 + 
+                                        (centroid_y - target_y) ** 2)
+                    centroid_distances.append(distance)
+            
+            # Average centroid deviation
+            centroid_loss = torch.stack(centroid_distances).mean()
+            # loss_terms.append(centroid_loss)
+            loss_components['centroid_loss'] = centroid_loss.item()
+        
+        # ========== 4. Average focusing efficiency loss for focal plane ==========
+        x_grid_eff, y_grid_eff = torch.meshgrid(
+            torch.arange(N, device=self.device),
+            torch.arange(N, device=self.device),
+            indexing='ij'
+        )
         efficiencies = []
         theoretical_efficiency = (N ** 2) / (self.M * self.M)
+        
         for center in self.centers_pixel_up: 
-            distances = torch.sqrt((x_grid - center[0]) ** 2 + (y_grid - center[1]) ** 2)
+            distances = torch.sqrt((x_grid_eff - center[0]) ** 2 + 
+                                (y_grid_eff - center[1]) ** 2)
             mask = distances <= self.airy_radius * self.airy_correction / pixel_size
             encircled_energy = I_focal_full[mask].sum()
             efficiencies.append(encircled_energy / theoretical_efficiency)
+        
         efficiencies = torch.stack(efficiencies)
         efficiency_mean = efficiencies.mean()
         efficiency_std = efficiencies.std()
         
-        # Masked loss
-        I_focal_masked = self.forward(U_in=self.U_masked, z=self.focal_length, upsampling=upsampling)
-        mse_masked = loss_fn(I_focal_masked, self.mask_psfs_up)
+        loss_terms.append(-20 * efficiency_mean)
+        loss_terms.append(50 * efficiency_std)
+        loss_components['eff_mean'] = efficiency_mean.item()
+        loss_components['eff_std'] = efficiency_std.item()
         
-        total_loss = torch.sum(torch.stack((mse, 
-                                            -10*efficiency_mean, 
-                                            10*efficiency_std, 
-                                            mse_masked)))
-        loss_components = {
-            'focal_mse': mse.item(),
-            'eff_mean': efficiency_mean.item(),
-            'eff_std': efficiency_std.item(),
-            'masked': mse_masked.item(),
-            'total_loss': total_loss.item()
-        }
+        
+        # ========== 5. Masked loss ==========
+        I_focal_masked = self.forward(
+            U_in=self.U_masked, 
+            z=self.focal_length, 
+            upsampling=upsampling
+        )
+        mse_masked = loss_fn(I_focal_masked, self.mask_psfs_up)
+        loss_terms.append(mse_masked)
+        loss_components['masked'] = mse_masked.item()
+        
+         # ========== Combine all losses ==========
+        total_loss = torch.sum(torch.stack(loss_terms))
+        loss_components['total_loss'] = total_loss.item()
+
         return total_loss, loss_components
     
     def update_phase_8bit(self, two_pi_value) -> np.array:
@@ -294,13 +382,21 @@ class PhaseGenerator:
             for key, value in loss_components.items():
                 self.history[key].append(value)
             # Callback
-            if (i % 50 == 0 or i == self.ni - 1):
+            if (i % self.show_iters == 0 or i == self.ni - 1):
                 if update_callback:
                     update_callback(i, self.ni, total_loss.item(), self.phase_param)
                 else:
+                    header = f"Iter: {i+1}/{self.ni}"
+                    max_width = config.TEXT_WIDTH_WRAP  # 终端宽度
                     loss_str = " ".join([f"{k.capitalize()}: {v:.4f}" for k, v in loss_components.items() if k != 'total_loss'])
                     loss_str += f" Total: {loss_components['total_loss']:.4e}" if 'total_loss' in loss_components else ""
-                    print(f"Iter: {i+1}/{self.ni} {loss_str}", flush=True)
+                    if len(header) + len(loss_str) + 1 > max_width:
+                        print(header)
+                        wrapped_lines = textwrap.wrap(loss_str, width=max_width - 2)
+                        for line in wrapped_lines:
+                            print(f"  {line}")
+                    else:
+                        print(f"{header} {loss_str}")
         
         elapsed_time = time.time() - start_time
         print() 
@@ -330,6 +426,7 @@ class PhaseGenerator:
         - self.depth_out_focus_ratio: z_ratio列表，用于生成离焦中心坐标
         """
         N_up = int(self.N * upsampling)
+        pixel_size_up = self.pixel_size / upsampling
         
         # 0. 非上采样版本，生成in-focus的多平面PSF（包含depth_psfs）
         results = self._create_gaussian_template(
@@ -374,11 +471,13 @@ class PhaseGenerator:
             # 上采样版本，生成out-of-focus的mask
             region_size_norm = 1.0 / (self.M - (self.M - 1) * self.overlap_ratio)
             lens_width_px_up = region_size_norm * (N_up - 1)
-            radii_up = torch.tensor(
-                [lens_width_px_up * (1.0-z) / 2.0 for z in self.depth_out_focus_ratio],
-                device=self.device,
-                dtype=torch.float32
-            )
+            # 考虑衍射airy blur半径
+            radii_list = []
+            for z in self.depth_out_focus_ratio:
+                half_width = lens_width_px_up * (1.0 - z) / 2.0
+                radius = math.sqrt(half_width ** 2 + (self.airy_radius/pixel_size_up) ** 2)
+                radii_list.append(radius)
+            radii_up = torch.tensor(radii_list, device=self.device, dtype=torch.float32)
             # [num_out_focus, M*M, N_up, N_up]
             self.out_focus_masks_up = generate_lens_circular_masks(
                 centers_pixel=self.centers_pixel_out_focus_up,
