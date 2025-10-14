@@ -10,11 +10,12 @@ import torch.nn.functional as F
 import os
 import time
 import config
-from visualization import visualize_lenses_and_tiles
 from typing import Dict, Any, List, Tuple, Optional
 from collections import defaultdict
 from optics_utils import create_checkerboard
-# Assuming wave_propagation is an available external library
+from optics_utils import compute_psf_centers, generate_tile_masks, generate_gaussian_psf
+from optics_utils import generate_lens_circular_masks
+        
 import wave_propagation as wp
 import math
 
@@ -39,6 +40,8 @@ class PhaseGenerator:
         self.lr = params['lr']
         self.device = device
         print(f"Using device: {self.device}")
+        self.depth_in_focus = params['depth_in_focus']
+        self.depth_out_focus = params['depth_out_focus']
         
         # simple calculations for other parameters
         self.L = None
@@ -61,6 +64,9 @@ class PhaseGenerator:
         self.total_psfs_up = None
         self.mask_psfs_up = None
         self.centers_pixel_up = None
+        self.depth_psfs_up = None
+        self.centers_pixel_out_focus_up = None
+        self.out_focus_masks_up = None
 
     def generate_fresnel_phase(self,N=None) -> np.ndarray:
         """
@@ -128,6 +134,11 @@ class PhaseGenerator:
         # MSE loss for focal plane
         I_focal_full = self.forward(z=self.focal_length, upsampling=upsampling)
         mse = loss_fn(I_focal_full, self.total_psfs_up)
+
+        # Depth MES Loss for in-focus planes
+
+        # Centroid loss for out-focus planes 
+        # (Regional centroid deviation from geo. centers pixel)
         
         # Average focusing efficiency loss for focal plane
         x_grid, y_grid = torch.meshgrid(torch.arange(N, device=self.device),
@@ -161,6 +172,47 @@ class PhaseGenerator:
         }
         return total_loss, loss_components
     
+    def update_phase_8bit(self, two_pi_value) -> np.array:
+        self.two_pi_value = two_pi_value
+        self._post_process_phase()
+        return self.phase_8bit
+    
+    def generate(self, mode: str = 'optimized', 
+                 init_mode: str = 'random', 
+                 upsampling = 1.0,
+                 visualize = True,
+                 vis_callback=None):
+        """
+        统一生成相位图，支持'fresnel'或'optimized'模式。生成后，直接从实例属性访问结果。
+        对于'optimized'，init_mode可为'random'（默认）或'fresnel'（用Fresnel作为初始相位）。
+        """
+        
+        if mode not in ['fresnel', 'optimized']:
+            raise ValueError("Mode must be 'fresnel' or 'optimized'.")
+        if init_mode not in ['random', 'fresnel']:
+            raise ValueError("init_mode must be 'random' or 'fresnel'.")
+
+        
+        init_phase = None
+        if mode == 'fresnel':
+            self.phase = self.generate_fresnel_phase()
+            self.phase_param = torch.tensor(self.phase, device=self.device, dtype=torch.float32)
+            self._prepare_template(visualize=False)
+            self._update_parameters(mode=mode)
+            
+        elif mode == 'optimized':
+            
+            if init_mode == 'fresnel':
+                fresnel_phase_np = self.generate_fresnel_phase()
+                init_phase = torch.tensor(fresnel_phase_np, dtype=torch.float32)
+            self._prepare_template(upsampling=upsampling, visualize=visualize)
+            self._optimize_phase(init_phase=init_phase, update_callback=vis_callback, upsampling=upsampling)
+            self.phase = torch.remainder(self.phase_param, 2 * np.pi).detach().cpu().numpy()
+            self._update_parameters(mode=mode)
+            
+        self._post_process_phase()
+    
+    
     def _update_parameters(self,mode='fresnel'):
         # simple calculations
         self.L = self.N * self.pixel_size
@@ -176,25 +228,17 @@ class PhaseGenerator:
             self.f_number = self.focal_length / self.lens_width 
             self.depth_of_focus = 2*self.wavelength*self.f_number**2
             self.airy_radius = 1.22*self.wavelength*self.f_number
+        
+        if self.depth_in_focus is None:
+            self.depth_in_focus = self.focal_length
+        else:
+            self.depth_in_focus = [self.focal_length + d*self.depth_of_focus*self.dof_correction
+                                    for d in self.depth_in_focus]
+            
+        if self.depth_out_focus is not None:
+            self.depth_out_focus = [self.focal_length + d*self.depth_of_focus*self.dof_correction
+                                    for d in self.depth_out_focus]
     
-    def _prepare_template(self,upsampling=1.0,visualize=True):
-         # Target patterns for optimization
-        results = self._create_gaussian_template(
-            upsampling = upsampling, 
-            visualize=visualize        )
-        self.mask_psfs_up = results['mask_psfs'] * self.psf_energy_level
-        self.total_psfs_up = results['total_psfs'] * self.psf_energy_level
-        masks = results['masks']
-        self.centers_pixel_up = results['centers_pixel']
-        
-        # target patterns for general use
-        results = self._create_gaussian_template(visualize=False)
-        self.total_psfs = results['total_psfs']
-        self.centers_pixel = results['centers_pixel']
-        
-        # Incident modulation for optimization
-        self.U_masked = masks.to(device=self.device, dtype=torch.complex64)
-        
     def _optimize_phase(self, 
                         init_phase: torch.Tensor = None, 
                         update_callback=None,
@@ -249,350 +293,200 @@ class PhaseGenerator:
         checkerboard = create_checkerboard(self.shape)
         combined_phase = np.where(roi_mask, final_phase, checkerboard)
         self.phase_8bit = np.uint8(combined_phase / (2 * np.pi) * self.two_pi_value)   
-        
-    def update_phase_8bit(self, two_pi_value) -> np.array:
-        self.two_pi_value = two_pi_value
-        self._post_process_phase()
-        return self.phase_8bit
     
-    def generate(self, mode: str = 'optimized', 
-                 init_mode: str = 'random', 
-                 upsampling = 1.0,
-                 vis_callback=None):
+    def _prepare_template(self, upsampling=1.0, visualize=True):
         """
-        统一生成相位图，支持'fresnel'或'optimized'模式。生成后，直接从实例属性访问结果。
-        对于'optimized'，init_mode可为'random'（默认）或'fresnel'（用Fresnel作为初始相位）。
+        准备优化模板
+        使用类参数：
+        - self.depth_in_focus: z_ratio列表，用于生成depth_psfs
+        - self.depth_out_focus: z_ratio列表，用于生成离焦中心坐标
         """
+        N_up = int(self.N * upsampling)
         
-        if mode not in ['fresnel', 'optimized']:
-            raise ValueError("Mode must be 'fresnel' or 'optimized'.")
-        if init_mode not in ['random', 'fresnel']:
-            raise ValueError("init_mode must be 'random' or 'fresnel'.")
-
+        # 上采样版本，生成in-focus的多平面PSF（包含depth_psfs）
+        results = self._create_gaussian_template(
+            upsampling=upsampling,
+            visualize=visualize,
+            z_ratios=self.depth_in_focus
+        )
+        self.mask_psfs_up = results['mask_psfs'] * self.psf_energy_level
+        self.total_psfs_up = results['total_psfs'] * self.psf_energy_level
+        self.depth_psfs_up = results['depth_psfs'] * self.psf_energy_level  # [num_depths, N, N]
+        self.centers_pixel_up = results['centers_pixel']
+        masks = results['masks']
         
-        init_phase = None
-        if mode == 'fresnel':
-            self.phase = self.generate_fresnel_phase()
-            self.phase_param = torch.tensor(self.phase, device=self.device, dtype=torch.float32)
-            self._prepare_template(visualize=False)
-            self._update_parameters(mode=mode)
-            
-        elif mode == 'optimized':
-            
-            if init_mode == 'fresnel':
-                fresnel_phase_np = self.generate_fresnel_phase()
-                init_phase = torch.tensor(fresnel_phase_np, dtype=torch.float32)
-            self._prepare_template(upsampling=upsampling)
-            self._optimize_phase(init_phase=init_phase, update_callback=vis_callback, upsampling=upsampling)
-            self.phase = torch.remainder(self.phase_param, 2 * np.pi).detach().cpu().numpy()
-            self._update_parameters(mode=mode)
-            
-        self._post_process_phase()
-    
+        # 上采样版本，out-of-focus中心和mask
+        if self.depth_out_focus is not None:
+            # 生成out-of-focus的中心坐标（仅坐标，不需要PSF）
+            centers_out_focus_list = []
+            for z_ratio in self.depth_out_focus:
+                center_info = compute_psf_centers(
+                    M=self.M,
+                    overlap_ratio=self.overlap_ratio,
+                    center_blend=self.center_blend,
+                    z_ratio=z_ratio,
+                    N=N_up,
+                    device=self.device
+                )
+                centers_out_focus_list.append(center_info['centers_pixel'])
+            # [num_out_focus, M*M, 2]
+            self.centers_pixel_out_focus_up = torch.stack(centers_out_focus_list, dim=0)
 
-    def _create_gaussian_template(self, upsampling: float = 1.0, 
-                                  coarse_grid_size: int = 2,
-                                  visualize: bool = True, 
-                                  display_lens_idx: Tuple[int, int] = (0, 0)) -> Dict[str, Any]:
+            # 上采样版本，生成out-of-focus的mask
+            region_size_norm = 1.0 / (self.M - (self.M - 1) * self.overlap_ratio)
+            lens_width_px_up = region_size_norm * (N_up - 1)
+            radii_up = torch.tensor(
+                [lens_width_px_up * z / 2.0 for z in self.depth_out_focus],
+                device=self.device,
+                dtype=torch.float32
+            )
+            self.out_focus_masks_up = generate_lens_circular_masks(
+                centers_pixel=self.centers_pixel_out_focus_up,
+                radii_pixels=radii_up,
+                N=N_up,
+                device=self.device
+            )
+
+        # 非上采样版本，生成in-focus的PSF（包含depth_psfs）
+        results = self._create_gaussian_template(
+            upsampling=1.0,
+            visualize=False,
+            z_ratios=self.depth_in_focus
+        )
+        self.total_psfs = results['total_psfs']
+        self.centers_pixel = results['centers_pixel']
+
+        # Incident modulation for optimization
+        self.U_masked = masks.to(device=self.device, dtype=torch.complex64)
+
+    def _create_gaussian_template(
+        self,
+        upsampling: float = 1.0,
+        coarse_grid_size: int = 2,
+        visualize: bool = True,
+        display_lens_idx: Tuple[int, int] = (0, 0),
+        z_ratios: Optional[List[float]] = None
+    ) -> Dict[str, Any]:
         """
-        Create Gaussian PSF template using internal parameters of PhaseOptimizer.
+        创建高斯PSF模板。
         
         Parameters
         ----------
         upsampling : float
-            Optional upsampling factor for higher-resolution template generation.
+            上采样因子
+        coarse_grid_size : int
+            粗网格大小
         visualize : bool
-            Whether to visualize the lens and tile layout.
-        
+            是否可视化
+        display_lens_idx : Tuple[int, int]
+            要高亮显示的透镜索引
+        z_ratios : List[float], optional
+            传播距离比例列表。如果为None，默认为[1.0]
+            
         Returns
         -------
         Dict[str, Any]
-            Dictionary containing PSF templates, masks, and pixel coordinates.
+            - 'total_psfs': z_ratio=0时的PSF [N, N]
+            - 'mask_psfs': z_ratio=0时的mask PSF [mask_count, N, N]
+            - 'depth_psfs': 不同z_ratio的PSF [len(z_ratios), N, N]
+            - 'centers_pixel': z_ratio=0时的中心坐标 [M*M, 2]
+            - 'masks': 像素级mask [mask_count, N, N]
         """
-        # Use internal attributes
         N = int(self.N * upsampling)
-        L = self.L
-        focal_length = self.focal_length
-        wavelength = self.wavelength
-        M = self.M
-        overlap_ratio = self.overlap_ratio
-        device = self.device
-
-        # Optional parameters if defined
-        center_blend = self.center_blend
-        airy_correction = self.airy_correction
-        mask_count = self.mask_count
-        interleaving = self.interleaving
         
-        assert N > 0 and M > 0
-        assert 0.0 <= overlap_ratio < 1.0
-        assert mask_count >= 2
-        if mask_count > coarse_grid_size**2:
-            print(f'coarse_grid_size={coarse_grid_size} is too small for current mask_count.')
-            coarse_grid_size = int(math.ceil(math.sqrt(mask_count)))
-            print(f'Use {coarse_grid_size} instead.')
-            
-        # Basic grid
-        pixel_size = L / N
-        Y, X = torch.meshgrid(
-            torch.arange(N, device=device, dtype=torch.float32),
-            torch.arange(N, device=device, dtype=torch.float32),
-            indexing='ij'
+        if z_ratios is None:
+            z_ratios = [1.0]
+        z_ratios_list = list(z_ratios)
+        
+        # 1. 生成masks（只需要一次）
+        mask_info = generate_tile_masks(
+            M=self.M,
+            L=self.L,
+            overlap_ratio=self.overlap_ratio,
+            center_blend=self.center_blend,
+            mask_count=self.mask_count,
+            interleaving=self.interleaving,
+            N=N,
+            coarse_grid_size=coarse_grid_size,
+            device=self.device
+        )
+        masks = mask_info['masks']
+        tiles = mask_info['tiles']
+        a_lens_mask = mask_info['a_lens_mask']
+        
+        # 2. 计算z_ratio=0时的PSF中心
+        center_info_z0 = compute_psf_centers(
+            M=self.M,
+            overlap_ratio=self.overlap_ratio,
+            center_blend=self.center_blend,
+            z_ratio=0.0,
+            N=N,
+            device=self.device
+        )
+        centers_pixel_z0 = center_info_z0['centers_pixel']
+        
+        #  计算z_ratio=0时的PSF
+        psf_result_z0 = generate_gaussian_psf(
+            centers_pixel=centers_pixel_z0,
+            N=N,
+            L=self.L,
+            M=self.M,
+            overlap_ratio=self.overlap_ratio,
+            focal_length=self.focal_length,
+            wavelength=self.wavelength,
+            airy_correction=self.airy_correction,
+            masks=masks,
+            a_lens_mask=a_lens_mask,
+            normalize=True,
+            device=self.device
         )
         
-        # Geometry with overlap
-        region_size_norm = 1.0 / (M - (M - 1) * overlap_ratio)
-        stride_norm = region_size_norm * (1.0 - overlap_ratio)
-        
-        # Effective sub-aperture size
-        D_eff = L * region_size_norm
-        
-        # Airy disk and Gaussian parameters
-        r_airy = 1.22 * wavelength * focal_length * airy_correction / D_eff
-        sigma = 0.42 * r_airy
-        sigma_px = float(sigma / pixel_size)
-        
-        # PSF centers: interpolate between no-overlap and overlap positions
-        i_idx = torch.arange(M, device=device, dtype=torch.float32)
-        j_idx = torch.arange(M, device=device, dtype=torch.float32)
-        
-        # No-overlap centers (uniform grid)
-        cx_no_norm = (i_idx + 0.5) / M
-        cy_no_norm = (j_idx + 0.5) / M
-        
-        # Overlap geometry centers
-        cx_ov_norm = i_idx * stride_norm + region_size_norm / 2.0
-        cy_ov_norm = j_idx * stride_norm + region_size_norm / 2.0
-        
-        # Create meshgrids
-        CX_no, CY_no = torch.meshgrid(cx_no_norm, cy_no_norm, indexing='ij')
-        CX_ov, CY_ov = torch.meshgrid(cx_ov_norm, cy_ov_norm, indexing='ij')
-        
-        # Interpolate centers
-        t = float(max(0.0, min(1.0, center_blend)))
-        CX = (1.0 - t) * CX_no + t * CX_ov
-        CY = (1.0 - t) * CY_no + t * CY_ov
-        CX = CX.clamp(0.0, 1.0)
-        CY = CY.clamp(0.0, 1.0)
-        
-        # Convert to pixel coordinates
-        scale = N - 1
-        centers_pixel = torch.stack([(CX * scale).reshape(-1), (CY * scale).reshape(-1)], dim=-1)
-        
-        # Geometric centers for lens coverage (always use overlap geometry)
-        centers_geom_pixel = torch.stack([(CX_ov * scale).reshape(-1), (CY_ov * scale).reshape(-1)], dim=-1)
-        
-        # Lens dimensions in pixels
-        w_px = region_size_norm * scale
-        half_w = w_px / 2.0
-        
-        # 改进的tile边界生成 - 确保覆盖所有区域
-        # 创建包含所有透镜边界和图像边界的完整边界集合
-        lens_boundaries_x = set()
-        lens_boundaries_y = set()
-        
-        for i in range(M):
-            x_start = i * stride_norm
-            x_end = min(x_start + region_size_norm, 1.0)
-            lens_boundaries_x.add(x_start)
-            lens_boundaries_x.add(x_end)
-        
-        for j in range(M):
-            y_start = j * stride_norm
-            y_end = min(y_start + region_size_norm, 1.0)
-            lens_boundaries_y.add(y_start)
-            lens_boundaries_y.add(y_end)
-        
-        # 添加图像边界
-        lens_boundaries_x.add(0.0)
-        lens_boundaries_x.add(1.0)
-        lens_boundaries_y.add(0.0)
-        lens_boundaries_y.add(1.0)
-        
-        # 转换为排序列表
-        norm_edges_x = sorted(lens_boundaries_x)
-        norm_edges_y = sorted(lens_boundaries_y)
-        
-        # 生成tiles
-        tiles = []
-        for kx in range(len(norm_edges_x) - 1):
-            x_start_norm = norm_edges_x[kx]
-            x_end_norm = norm_edges_x[kx + 1]
+        # 3. 计算不同z_ratio的PSF
+        depth_psfs_list = []
+        for z_ratio in z_ratios_list:
+            center_info = compute_psf_centers(
+                M=self.M,
+                overlap_ratio=self.overlap_ratio,
+                center_blend=self.center_blend,
+                z_ratio=z_ratio,
+                N=N,
+                device=self.device
+            )
             
-            # 跳过零宽度的tiles
-            if x_end_norm - x_start_norm < 1e-6:
-                continue
-                
-            for ky in range(len(norm_edges_y) - 1):
-                y_start_norm = norm_edges_y[ky]
-                y_end_norm = norm_edges_y[ky + 1]
-                
-                # 跳过零高度的tiles
-                if y_end_norm - y_start_norm < 1e-6:
-                    continue
-                
-                tile_width = (x_end_norm - x_start_norm) * L
-                tile_height = (y_end_norm - y_start_norm) * L
-                tile_area = tile_width * tile_height
-                
-                # 找出贡献的透镜
-                contributing_lenses = []
-                for ii in range(M):
-                    for jj in range(M):
-                        lens_x_start = ii * stride_norm
-                        lens_x_end = min(lens_x_start + region_size_norm, 1.0)
-                        lens_y_start = jj * stride_norm
-                        lens_y_end = min(lens_y_start + region_size_norm, 1.0)
-                        
-                        # 检查是否有重叠
-                        if (x_start_norm < lens_x_end and x_end_norm > lens_x_start and
-                            y_start_norm < lens_y_end and y_end_norm > lens_y_start):
-                            contributing_lenses.append((ii, jj))
-                
-                # 分配到mask组
-                if interleaving == "checkerboard":
-                    # 简单棋盘模式
-                    group = (kx + ky) % mask_count
-                    
-                elif interleaving.startswith("coarse"):
-                    # 基于粗网格的分组策略
-                    # 确定当前tile属于哪个super tile
-                    super_tile_x = kx // coarse_grid_size
-                    super_tile_y = ky // coarse_grid_size
-                    
-                    # 在super tile内部的位置
-                    local_x = kx % coarse_grid_size
-                    local_y = ky % coarse_grid_size
-                    
-                    # Super tile内部的tiles总数
-                    tiles_per_super = coarse_grid_size * coarse_grid_size
-                    
-                    if interleaving == "coarse3":
-                        # 顺序分配：Super tile内的tiles按行优先顺序分配
-                        local_index = local_y * coarse_grid_size + local_x
-                        
-                        if mask_count <= tiles_per_super:
-                            # 如果mask数量不超过super tile内的tiles数
-                            group = local_index % mask_count
-                        else:
-                            # 如果mask数量超过super tile内的tiles数，使用扩展模式
-                            group = (local_index + (super_tile_x + super_tile_y) * tiles_per_super) % mask_count
-                        
-                        # 对奇数super tiles进行组号反转，增加多样性
-                        if (super_tile_x + super_tile_y) % 2 == 1:
-                            group = (mask_count - 1 - group) % mask_count
-                            
-                    elif interleaving == "coarse2":
-                        # 顺序分配：Super tile内的tiles按行优先顺序分配
-                        local_index = local_y * coarse_grid_size + local_x
-                        
-                        if mask_count <= tiles_per_super:
-                            # 如果mask数量不超过super tile内的tiles数
-                            group = local_index % mask_count
-                        else:
-                            # 如果mask数量超过super tile内的tiles数，使用扩展模式
-                            group = (local_index + (super_tile_x + super_tile_y) * tiles_per_super) % mask_count
-                    elif interleaving == "coarse1":
-                        local_index = local_y  + local_x 
-                        group = local_index % mask_count
-                        
-                else:
-                    # 默认fallback到checkerboard
-                    group = (kx + ky) % mask_count
-                
-                tiles.append({
-                    'x_start_norm': x_start_norm,
-                    'x_end_norm': x_end_norm,
-                    'y_start_norm': y_start_norm,
-                    'y_end_norm': y_end_norm,
-                    'x_start_px': x_start_norm * scale,
-                    'x_end_px': x_end_norm * scale,
-                    'y_start_px': y_start_norm * scale,
-                    'y_end_px': y_end_norm * scale,
-                    'area': tile_area,
-                    'lenses': contributing_lenses,
-                    'grid_kx': kx,
-                    'grid_ky': ky,
-                    'group': group,
-                    'num_lenses': len(contributing_lenses)
-                })
+            psf_result = generate_gaussian_psf(
+                centers_pixel=center_info['centers_pixel'],
+                N=N,
+                L=self.L,
+                M=self.M,
+                overlap_ratio=self.overlap_ratio,
+                focal_length=self.focal_length,
+                wavelength=self.wavelength,
+                airy_correction=self.airy_correction,
+                masks=None,  # depth_psfs不需要mask版本
+                normalize=True,
+                device=self.device
+            )
+            depth_psfs_list.append(psf_result['total_psf'])
         
-        # 将tiles转换为像素级的mask
-        # 使用更精确的边界映射
-        x_edges_px = torch.tensor([t * scale for t in norm_edges_x], device=device, dtype=torch.float32)
-        y_edges_px = torch.tensor([t * scale for t in norm_edges_y], device=device, dtype=torch.float32)
+        # 堆叠成3D张量
+        depth_psfs = torch.stack(depth_psfs_list, dim=0)  # [len(z_ratios_list), N, N]
         
-        x_bins = torch.searchsorted(x_edges_px[1:], X.reshape(-1), right=False).reshape(N, N)
-        y_bins = torch.searchsorted(y_edges_px[1:], Y.reshape(-1), right=False).reshape(N, N)
-        
-        # 创建masks
-        masks = torch.zeros((mask_count, N, N), device=device, dtype=torch.bool)
-        for tile in tiles:
-            kx = tile['grid_kx']
-            ky = tile['grid_ky']
-            group = tile['group']
-            
-            # 找到属于这个tile的像素
-            tile_mask = (x_bins == kx) & (y_bins == ky)
-            masks[group] |= tile_mask
-        
-        # Lens coverage masks
-        num_lenses = M * M
-        X2 = X.unsqueeze(0)
-        Y2 = Y.unsqueeze(0)
-        
-        cxg = centers_geom_pixel[:, 0].view(num_lenses, 1, 1)
-        cyg = centers_geom_pixel[:, 1].view(num_lenses, 1, 1)
-        
-        lens_mask = (X2 - cxg).abs() <= half_w
-        lens_mask &= (Y2 - cyg).abs() <= half_w
-        
-        # Calculate area fractions for each lens in each mask
-        inter_counts = (lens_mask[:, None] & masks[None, :]).sum(dim=(2, 3)).to(torch.float32)
-        lens_counts = lens_mask.view(num_lenses, -1).sum(dim=1).clamp(min=1).to(torch.float32)
-        a_lens_mask = inter_counts / lens_counts[:, None]
-        
-        # Accumulate PSFs
-        gaussian_sum_total = torch.zeros((N, N), device=device, dtype=torch.float32)
-        gaussian_sum_masks = torch.zeros((mask_count, N, N), device=device, dtype=torch.float32)
-        
-        inv_two_sigma2 = 0.5 / (sigma_px ** 2 + 1e-20)
-        
-        for l in range(num_lenses):
-            cx, cy = centers_pixel[l, 0], centers_pixel[l, 1]
-            dist_sq = (X - cx) ** 2 + (Y - cy) ** 2
-            g = torch.exp(-dist_sq * inv_two_sigma2)
-            gaussian_sum_total += g
-            
-            # Weight by area fraction for each mask
-            weights = a_lens_mask[l].view(mask_count, 1, 1)
-            gaussian_sum_masks += weights * g
-        
-        # Normalize
-        denom = gaussian_sum_total.sum().clamp_min(1e-12)
-        normalized_gaussian = gaussian_sum_total / denom * (N * N)
-        mask_psfs = gaussian_sum_masks / denom * (N * N)
-        
-        # Group tiles by mask (removed as unused)
-        # masks_tiles = [[] for _ in range(mask_count)]
-        # for tile in tiles:
-        #     masks_tiles[tile['group']].append(tile)
-        
-        # Compute airy_radius_px for focusing efficiency
-        airy_radius_px = float(r_airy / pixel_size / airy_correction)
-        
-        # 可视化
+        # 4. 可视化
         if visualize:
+            from visualization import visualize_lenses_and_tiles
             visualize_lenses_and_tiles(
-                tiles, M, stride_norm, region_size_norm,
-                mask_count, display_lens_idx
+                tiles=tiles,
+                M=self.M,
+                stride_norm=center_info_z0['stride_norm'],
+                region_size_norm=center_info_z0['region_size_norm'],
+                mask_count=self.mask_count,
+                display_lens_idx=display_lens_idx
             )
         
         return {
-            'total_psfs': normalized_gaussian,
-            'centers_pixel': centers_pixel,
-            'masks': masks,
-            'mask_psfs': mask_psfs
+            'total_psfs': psf_result_z0['total_psf'],
+            'mask_psfs': psf_result_z0['mask_psfs'],
+            'depth_psfs': depth_psfs,
+            'centers_pixel': centers_pixel_z0,
+            'masks': masks
         }
-
-            

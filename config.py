@@ -38,6 +38,9 @@ OPTIMIZED_DEFAULTS = {
 
 # 优化器内部参数 (non-UI)
 INTERNAL = {
+    'depth_in_focus': [-1.0, 1.0],
+    # 'depth_out_focus': [-5.0] 
+    'depth_out_focus': None
 }
 
 # ROI默认设置 (方形)
