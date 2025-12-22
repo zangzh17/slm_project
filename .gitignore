@@ -1,0 +1,10 @@
+# Image files
+*.mat
+*.gif
+*.tif
+*.tiff
+*.npy
+*.pkl
+# Python compiled files
+*.pyc
+*.asv
