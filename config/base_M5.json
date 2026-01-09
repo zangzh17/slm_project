@@ -1,0 +1,39 @@
+{
+    "focal_length": 0.0739,
+    "N": 850,
+    "output_size": 850,
+    "roi_center_y": 576,
+    "roi_center_x": 960,
+    "M": 5,
+    "two_pi_value": 210,
+    "overlap_ratio": 0.3,
+    "dof_correction": 1.0,
+    "airy_correction": 1.0,
+    "center_blend": 0.0,
+    "interleaving": "coarse1",
+    "mask_count": 2,
+    "psf_energy_level": 1.0,
+    "z_factor": 0.2,
+    "lr": 0.05,
+    "ni": 500,
+    "depth_in_focus": [
+        -0.5,
+        0.5
+    ],
+    "depth_out_focus": null,
+    "focusing_eff_correction": 1.0,
+    "masked_airy_correction": 1.0,
+    "show_iters": 50,
+    "weights": {
+        "mse": 1.0,
+        "depth_in_focus": 1.0,
+        "depth_out_focus": 0.0,
+        "masked": 1.0,
+        "eff_mean": 20.0,
+        "eff_std": 50.0
+    },
+    "shape": [
+        1152,
+        1920
+    ]
+}
