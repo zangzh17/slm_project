@@ -7,9 +7,9 @@ from scipy import ndimage
 import torch
 from scipy.ndimage import zoom
 from typing import Dict, List, Tuple, Optional
-import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from IPython.display import display, clear_output
+import ipywidgets as widgets
 from optics_utils import calculate_airy_disk
 from optics_utils import compute_psf_centers
 
@@ -98,28 +98,38 @@ def plot_phase(optimizer):
     plt.legend()
     plt.show()
     
-def plot_2d_comparisons(optimizer):
-    """Side-by-side comparison of optimized intensity patterns with propagation analysis."""
-    
-    def compute_propagation_map(U_in, z_values, optimizer, max_norm=True):
+def plot_2d_comparisons(optimizer, slice_y=None):
+    """Side-by-side comparison of optimized intensity patterns with propagation analysis.
+
+    Parameters
+    ----------
+    optimizer : PhaseGenerator
+        The optimizer object
+    slice_y : int, optional
+        Y position for the slice. If None, uses center (N//2).
+    """
+    if slice_y is None:
+        slice_y = optimizer.N // 2
+
+    def compute_propagation_map(U_in, z_values, optimizer, slice_pos, max_norm=True):
         """Compute intensity map for multiple propagation distances."""
         n_z = len(z_values)
         # Get the shape from a test propagation
         test_field = optimizer.forward(U_in=U_in, z=z_values[0])
         n_y = test_field.shape[0]
-        
+
         # Initialize the intensity map
         intensity_map = torch.zeros((n_z, n_y))
-        
+
         for i, z in enumerate(z_values):
             # Propagate to distance z
             intensity = optimizer.forward(U_in=U_in,z=z_values[i])
             # Sum along x-axis (axis=1) to get 1D intensity profile
-            intensity_1d = intensity[optimizer.N//2,:]
+            intensity_1d = intensity[slice_pos,:]
             if max_norm:
                 intensity_1d = intensity_1d/intensity_1d.max()
             intensity_map[i, :] = intensity_1d
-        
+
         return intensity_map.cpu().numpy()
     
     with torch.no_grad():
@@ -158,8 +168,8 @@ def plot_2d_comparisons(optimizer):
             
             # Plot 2: Propagation from 0 to 1.2x focal length, linear scale
             z_range_1 = torch.linspace(0, 1.2 * config["focal_dist"], n_samples)
-            intensity_map_1 = compute_propagation_map(config["U_in"], z_range_1, optimizer)
-            intensity_map_2 = compute_propagation_map(config["U_in"], z_range_1, optimizer, max_norm=False)
+            intensity_map_1 = compute_propagation_map(config["U_in"], z_range_1, optimizer, slice_y)
+            intensity_map_2 = compute_propagation_map(config["U_in"], z_range_1, optimizer, slice_y, max_norm=False)
             
             im2 = axes[1].imshow(intensity_map_1, cmap='hot',
                                 aspect='auto', extent=[0, intensity_map_1.shape[1]*optimizer.pixel_size*1e3, 
@@ -192,9 +202,9 @@ def plot_2d_comparisons(optimizer):
             # Plot 4: Propagation around focal length ± 4*depth_of_focus
             z_min = config["focal_dist"] - 4 * optimizer.depth_of_focus
             z_max = config["focal_dist"] + 4 * optimizer.depth_of_focus
-            
+
             z_range_2 = torch.linspace(z_min, z_max, n_samples)
-            intensity_map_3 = compute_propagation_map(config["U_in"], z_range_2, optimizer)
+            intensity_map_3 = compute_propagation_map(config["U_in"], z_range_2, optimizer, slice_y)
             
             # Convert to relative distance in micrometers
             z_range_2_relative_mm = (z_range_2 - config["focal_dist"]).numpy() * 1e3  # Convert to mm
@@ -246,6 +256,256 @@ def plot_2d_comparisons(optimizer):
             plt.tight_layout()
             plt.show()
 
+def plot_2d_comparisons_interactive(optimizer, upsampling=1.0):
+    """Interactive side-by-side comparison with adjustable slice position.
+
+    Provides coarse/fine slice position control to navigate through PSF positions,
+    especially useful when randomness is applied to PSF centers.
+
+    Parameters
+    ----------
+    optimizer : PhaseGenerator
+        The optimizer object
+    upsampling : float
+        Upsampling factor for visualization (default 1.0)
+    """
+    import matplotlib.patches as mpatches
+
+    N = optimizer.N
+    M = optimizer.M
+    N_up = int(N * upsampling)
+    pixel_size_up = optimizer.pixel_size / upsampling
+
+    # Get PSF center positions (accounting for randomness)
+    randomness = getattr(optimizer, 'randomness', 0.0)
+    random_seed = getattr(optimizer, 'random_seed', None)
+
+    center_info = compute_psf_centers(
+        M=M, overlap_ratio=optimizer.overlap_ratio, center_blend=optimizer.center_blend,
+        z_ratio=1.0, N=N_up, output_size=N_up, device=optimizer.device,
+        randomness=randomness, random_seed=random_seed
+    )
+    centers = center_info['centers_pixel'].cpu().numpy()  # [M*M, 2] format: [x, y]
+
+    # Calculate efficiency circle radius (same as plot_energy_distribution)
+    radius_meters = optimizer.airy_radius
+    radius_pixels = radius_meters / pixel_size_up
+
+    # Get unique y positions (rows) - centers[:, 1] is y coordinate
+    y_centers = sorted(set(int(c[1]) for c in centers))
+
+    # Create widgets - use HTML labels to avoid truncation
+    style = {'description_width': '90px'}
+    layout = widgets.Layout(width='350px')
+
+    w_coarse = widgets.IntSlider(
+        value=len(y_centers) // 2, min=0, max=len(y_centers) - 1, step=1,
+        description='PSF Row:', style=style, layout=layout,
+        continuous_update=False
+    )
+    w_fine = widgets.IntSlider(
+        value=0, min=-50, max=50, step=1,
+        description='Fine Adj:', style=style, layout=layout,
+        continuous_update=False
+    )
+    w_log_scale = widgets.Checkbox(value=True, indent=False)
+    w_log_range = widgets.FloatSlider(
+        value=4, min=1, max=6, step=0.5,
+        layout=widgets.Layout(width='150px'),
+        continuous_update=False, readout_format='.1f'
+    )
+    w_show_circles = widgets.Checkbox(value=False, indent=False)
+    w_position_label = widgets.HTML(value='')
+    plot_output = widgets.Output()
+
+    def update_position_label():
+        base_y = y_centers[w_coarse.value]
+        actual_y = base_y + w_fine.value
+        w_position_label.value = (
+            f'<b>Slice Y:</b> {actual_y} px (PSF row {w_coarse.value + 1}/{len(y_centers)}, '
+            f'base={base_y}, fine={w_fine.value:+d})'
+        )
+
+    def plot_all(change=None):
+        with plot_output:
+            clear_output(wait=True)
+            plt.close('all')
+
+            base_y = y_centers[w_coarse.value]
+            slice_y = base_y + w_fine.value
+            slice_y = max(0, min(N_up - 1, slice_y))  # Clamp to valid range
+            use_log = w_log_scale.value
+            log_range = w_log_range.value
+            show_circles = w_show_circles.value
+
+            update_position_label()
+
+            # Compute propagation map with specified slice position
+            def compute_propagation_map(U_in, z_values, max_norm=True):
+                n_z = len(z_values)
+                intensity_map = torch.zeros((n_z, N_up))
+                with torch.no_grad():
+                    for i, z in enumerate(z_values):
+                        intensity = optimizer.forward(U_in=U_in, z=z, upsampling=upsampling)
+                        intensity_1d = intensity[slice_y, :]
+                        if max_norm and intensity_1d.max() > 0:
+                            intensity_1d = intensity_1d / intensity_1d.max()
+                        intensity_map[i, :] = intensity_1d
+                return intensity_map.cpu().numpy()
+
+            n_samples = 50
+            focal_dist = optimizer.focal_length
+
+            # Create figure
+            fig = plt.figure(figsize=(18, 6))
+            gs = fig.add_gridspec(2, 4, height_ratios=[4, 2], hspace=0.3)
+            axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
+            ax_zoom = fig.add_subplot(gs[1, :])
+
+            fig.suptitle(f'Intensity Analysis - Slice Y={slice_y}', fontsize=14, y=0.98)
+
+            # Plot 1: Optimized Intensity with slice line (toggle log/linear)
+            with torch.no_grad():
+                I_opt = optimizer.forward(upsampling=upsampling).cpu().numpy()
+
+            if use_log:
+                vmin = I_opt.max() * (10 ** (-log_range))
+                im1 = axes[0].imshow(I_opt, cmap='hot',
+                                    norm=mcolors.LogNorm(vmin=vmin, vmax=I_opt.max()))
+                title1 = f'Optimized Intensity (log, {log_range:.0f} decades)'
+            else:
+                im1 = axes[0].imshow(I_opt, cmap='hot')
+                title1 = 'Optimized Intensity (linear)'
+
+            axes[0].axhline(y=slice_y, color='cyan', linestyle='--', linewidth=1, alpha=0.8)
+
+            # Draw efficiency circles if enabled
+            if show_circles:
+                for i in range(len(centers)):
+                    cx, cy = centers[i, 0], centers[i, 1]
+                    circle = mpatches.Circle((cx, cy), radius_pixels,
+                                            fill=False, edgecolor='lime',
+                                            linestyle='--', linewidth=0.8, alpha=0.7)
+                    axes[0].add_patch(circle)
+
+            axes[0].set_title(title1, fontsize=10)
+            axes[0].axis('off')
+            plt.colorbar(im1, ax=axes[0], shrink=0.7, pad=0.02)
+
+            # Plot 2: Propagation from 0 to 1.2x focal length
+            z_range_1 = torch.linspace(0, 1.2 * focal_dist, n_samples)
+            intensity_map_1 = compute_propagation_map(None, z_range_1)
+            intensity_map_2 = compute_propagation_map(None, z_range_1, max_norm=False)
+
+            im2 = axes[1].imshow(intensity_map_1, cmap='hot', aspect='auto',
+                                extent=[0, N_up * pixel_size_up * 1e3,
+                                        z_range_1[-1].item() * 1e3, z_range_1[0].item() * 1e3])
+            axes[1].set_title('Propagation (0 - 1.2× focal)', fontsize=10)
+            axes[1].set_xlabel('X (mm)', fontsize=9)
+            axes[1].set_ylabel('Z (mm)', fontsize=9)
+            plt.colorbar(im2, ax=axes[1], shrink=0.7, pad=0.02)
+
+            # Plot 3: Propagation log scale
+            intensity_map_log = intensity_map_2 / (intensity_map_2.max() + 1e-10)
+            intensity_map_log = np.log10(intensity_map_log + 1e-10)
+            intensity_map_log = np.clip(intensity_map_log, -4, 0)
+
+            im3 = axes[2].imshow(intensity_map_log, cmap='hot', aspect='auto',
+                                extent=[0, N_up * pixel_size_up * 1e3,
+                                        z_range_1[-1].item() * 1e3, z_range_1[0].item() * 1e3])
+            axes[2].set_title('Propagation (Log scale)', fontsize=10)
+            axes[2].set_xlabel('X (mm)', fontsize=9)
+            axes[2].set_ylabel('Z (mm)', fontsize=9)
+            cbar3 = plt.colorbar(im3, ax=axes[2], shrink=0.7, pad=0.02)
+            cbar3.set_label('log₁₀(I)', fontsize=9)
+
+            # Plot 4: Around focal
+            z_min = focal_dist - 4 * optimizer.depth_of_focus
+            z_max = focal_dist + 4 * optimizer.depth_of_focus
+            z_range_2 = torch.linspace(z_min, z_max, n_samples)
+            intensity_map_3 = compute_propagation_map(None, z_range_2)
+            z_range_2_relative_mm = (z_range_2 - focal_dist).numpy() * 1e3
+
+            im4 = axes[3].imshow(intensity_map_3, cmap='hot', aspect='auto',
+                                extent=[0, N_up * pixel_size_up * 1e3,
+                                        z_range_2_relative_mm[-1], z_range_2_relative_mm[0]])
+            axes[3].set_title('Around Focal (±4×DOF)', fontsize=10)
+            axes[3].set_xlabel('X (mm)', fontsize=9)
+            axes[3].set_ylabel('Δz (mm)', fontsize=9)
+            axes[3].axhline(y=0, color='white', linestyle='-', linewidth=0.5)
+            dof_mm = optimizer.depth_of_focus * 1e3
+            for mult in [0.5, 1.0]:
+                axes[3].axhline(y=mult * dof_mm, color='white', linestyle='--', linewidth=1, alpha=0.5)
+                axes[3].axhline(y=-mult * dof_mm, color='white', linestyle='--', linewidth=1, alpha=0.5)
+            plt.colorbar(im4, ax=axes[3], shrink=0.7, pad=0.02)
+
+            # Bottom zoom plot
+            im_zoom = ax_zoom.imshow(intensity_map_3, cmap='hot', aspect='auto',
+                                    extent=[0, N_up * pixel_size_up * 1e3,
+                                            z_range_2_relative_mm[-1], z_range_2_relative_mm[0]])
+            ax_zoom.set_ylim(-2.5 * dof_mm, 2.5 * dof_mm)
+            ax_zoom.set_title('Zoomed: Around Focal (±2.5×DOF)', fontsize=10)
+            ax_zoom.set_xlabel('X (mm)', fontsize=9)
+            ax_zoom.set_ylabel('Δz (mm)', fontsize=9)
+
+            for i in np.arange(-2.5, 3, 0.5):
+                linestyle = '-' if i == 0 else '--'
+                linewidth = 0.5 if i == 0 else 1.0
+                ax_zoom.axhline(y=i * dof_mm, color='white', linestyle=linestyle,
+                               linewidth=linewidth, alpha=0.8)
+            plt.colorbar(im_zoom, ax=ax_zoom, shrink=0.5, pad=0.02)
+
+            plt.tight_layout()
+            plt.show()
+
+    # Setup callbacks
+    w_coarse.observe(plot_all, names='value')
+    w_fine.observe(plot_all, names='value')
+    w_log_scale.observe(plot_all, names='value')
+    w_log_range.observe(plot_all, names='value')
+    w_show_circles.observe(plot_all, names='value')
+
+    # Navigation buttons
+    btn_layout = widgets.Layout(width='80px')
+    prev_btn = widgets.Button(description='◀ Prev', layout=btn_layout)
+    next_btn = widgets.Button(description='Next ▶', layout=btn_layout)
+    reset_btn = widgets.Button(description='Reset', layout=btn_layout)
+
+    def on_prev(b):
+        if w_coarse.value > 0:
+            w_coarse.value -= 1
+
+    def on_next(b):
+        if w_coarse.value < len(y_centers) - 1:
+            w_coarse.value += 1
+
+    def on_reset(b):
+        w_coarse.value = len(y_centers) // 2
+        w_fine.value = 0
+
+    prev_btn.on_click(on_prev)
+    next_btn.on_click(on_next)
+    reset_btn.on_click(on_reset)
+
+    # Display with HTML labels to avoid truncation
+    controls = widgets.VBox([
+        widgets.HTML('<h4>Slice Position Control</h4>'),
+        widgets.HBox([w_coarse, prev_btn, next_btn]),
+        widgets.HBox([w_fine, reset_btn]),
+        widgets.HBox([
+            widgets.HTML('<span style="margin-right:5px">Log:</span>'), w_log_scale,
+            widgets.HTML('<span style="margin:0 10px">Range:</span>'), w_log_range,
+            widgets.HTML('<span style="margin:0 10px">Circles:</span>'), w_show_circles,
+        ]),
+        w_position_label
+    ])
+    display(controls)
+    display(plot_output)
+
+    # Initial plot
+    plot_all()
+
+
 def plot_cross_sections(optimizer,upsampling=1.0):
     """
     Plot intensity comparison of central cross-sections (Wider Figure).
@@ -290,19 +550,21 @@ def plot_cross_sections(optimizer,upsampling=1.0):
     plt.show()
 
 
-def plot_energy_distribution(optimizer, upsampling=1.0):
+def plot_energy_distribution(optimizer, upsampling=1.0, fig=None):
     """
     可视化衍射透镜阵列中所有焦斑的聚焦效率（相对比例）。
-    
+
     使用精确的几何中心位置计算每个焦斑的圈入能量效率。
-    
+
     Parameters
     ----------
     optimizer : PhaseOptimizer
         优化器对象，包含所有必要的参数和方法
     upsampling : float
         上采样因子，用于更精确的能量计算
-        
+    fig : matplotlib.figure.Figure, optional
+        外部提供的Figure对象。如果为None，则创建新Figure。
+
     Notes
     -----
     该函数执行以下步骤：
@@ -321,6 +583,10 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
         I_opt = optimizer.forward(z=optimizer.focal_length, upsampling=upsampling).cpu().numpy()
     
     # ========== 步骤 1: 使用精确的几何中心 ==========
+    # 获取 randomness 和 random_seed 参数（如果存在）
+    randomness = getattr(optimizer, 'randomness', 0.0)
+    random_seed = getattr(optimizer, 'random_seed', None)
+
     center_info = compute_psf_centers(
         M=optimizer.M,
         overlap_ratio=optimizer.overlap_ratio,
@@ -328,7 +594,9 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
         z_ratio=1.0,  # 焦平面
         N=N_up,
         output_size=output_size_up,
-        device=optimizer.device
+        device=optimizer.device,
+        randomness=randomness,
+        random_seed=random_seed
     )
     centers_pixel = center_info['centers_pixel'].cpu().numpy()  # [M*M, 2]
     
@@ -337,6 +605,8 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
     print(f"Focusing Efficiency Analysis")
     print(f"{'='*60}")
     print(f"Number of focal spots: {num_spots} (M={optimizer.M}x{optimizer.M})")
+    if randomness > 0:
+        print(f"PSF Randomness: {randomness} (seed={random_seed})")
     
     # ========== 步骤 2: 计算半径 ==========
     # 使用airy半径和校正因子
@@ -393,7 +663,12 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
     # print(f"{'='*60}\n")
     
     # ========== 步骤 5: 可视化 ==========
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+    if fig is None:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+    else:
+        fig.clear()
+        ax1 = fig.add_subplot(1, 2, 1)
+        ax2 = fig.add_subplot(1, 2, 2)
     
     # --- 左图：柱状图 ---
     spot_indices = np.arange(len(efficiencies_percent))
@@ -420,6 +695,8 @@ def plot_energy_distribution(optimizer, upsampling=1.0):
                   f'Max: {max_eff:.2f}% (#{max_idx})\n'
                   f'Min: {min_eff:.2f}% (#{min_idx})\n'
                   f'Radius: {radius_pixels:.2f} px')
+    if randomness > 0:
+        stats_text += f'\nRandomness: {randomness}'
     
     ax1.text(0.98, 0.95, stats_text, transform=ax1.transAxes, fontsize=11,
              verticalalignment='top', horizontalalignment='right',

@@ -46,8 +46,12 @@ class PhaseGenerator:
         self.lr = params['lr']
         self.show_iters = params['show_iters']
         self.weights = params['weights']
+        self.randomness = params.get('randomness', 0.0)
+        self.random_seed = params.get('random_seed', None)
         self.device = device
         print(f"Using device: {self.device}")
+        if self.randomness > 0:
+            print(f"PSF randomization enabled: randomness={self.randomness}, seed={self.random_seed}")
 
         self.depth_in_focus_dof = params['depth_in_focus']
         self.depth_out_focus_ratio = params['depth_out_focus']
@@ -607,6 +611,7 @@ class PhaseGenerator:
         # 2. 上采样版本，out-of-focus中心和mask
         if self.depth_out_focus_ratio is not None:
             # 生成out-of-focus的中心坐标（仅坐标，不需要PSF）
+            # 使用相同的randomness和seed以保持一致性
             centers_out_focus_list = []
             for z_ratio in self.depth_out_focus_ratio:
                 center_info = compute_psf_centers(
@@ -616,7 +621,9 @@ class PhaseGenerator:
                     z_ratio=z_ratio,
                     N=N_up,
                     output_size=output_size_up,
-                    device=self.device
+                    device=self.device,
+                    randomness=self.randomness,
+                    random_seed=self.random_seed
                 )
                 centers_out_focus_list.append(center_info['centers_pixel'])
             # [num_out_focus, M*M, 2]
@@ -724,7 +731,9 @@ class PhaseGenerator:
             z_ratio=1.0,
             N=N,
             output_size=output_size,
-            device=self.device
+            device=self.device,
+            randomness=self.randomness,
+            random_seed=self.random_seed
         )
         centers_pixel_z0 = center_info_z0['centers_pixel']
         
@@ -759,7 +768,9 @@ class PhaseGenerator:
                 z_ratio=z_ratio,
                 N=N,
                 output_size=output_size,
-                device=self.device
+                device=self.device,
+                randomness=self.randomness,
+                random_seed=self.random_seed
             )
             # 注意是输出坐标，因此N用output_size
             psf_result = generate_gaussian_psf(

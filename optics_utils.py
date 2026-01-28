@@ -72,11 +72,13 @@ def compute_psf_centers(
     z_ratio: float = 1.0,
     N: int = 512,
     output_size = None,
-    device: torch.device = torch.device('cpu')
+    device: torch.device = torch.device('cpu'),
+    randomness: float = 0.0,
+    random_seed: Optional[int] = None
 ) -> Dict[str, torch.Tensor]:
     """
     计算不同传播距离下的PSF中心位置。
-    
+
     Parameters
     ----------
     M : int
@@ -95,7 +97,13 @@ def compute_psf_centers(
         输出像素数目，不输入则和输入像素一样
     device : torch.device
         计算设备
-        
+    randomness : float
+        随机化因子 [0, 1]，控制PSF位置的随机偏移程度
+        - 0.0: 无随机偏移（默认，保持均匀周期分布）
+        - >0: PSF位置施加高斯随机偏移，标准差 = randomness × pitch
+    random_seed : int, optional
+        随机种子，用于确保可复现性
+
     Returns
     -------
     Dict[str, torch.Tensor]
@@ -106,6 +114,7 @@ def compute_psf_centers(
         - 'shift_norm': 像素坐标到输出坐标的归一化平移量
         - 'region_size_norm': 归一化的区域大小
         - 'stride_norm': 归一化的步长
+        - 'random_offsets': 随机偏移量 [M*M, 2]（仅当randomness > 0时）
     """
     # 归一化几何参数（透镜坐标）
     region_size_norm = 1.0 / (M - (M - 1) * overlap_ratio)
@@ -152,17 +161,38 @@ def compute_psf_centers(
     
     # 归一化坐标转换为像素坐标，到达输出面
     centers_pixel = torch.stack([
-        (CX_final * scale).reshape(-1), 
+        (CX_final * scale).reshape(-1),
         (CY_final * scale).reshape(-1)
     ], dim=-1)
-    
+
     # 几何中心（始终使用重叠几何，用于透镜覆盖计算）
     centers_geom_pixel = torch.stack([
-        (CX_overlap * scale).reshape(-1), 
+        (CX_overlap * scale).reshape(-1),
         (CY_overlap * scale).reshape(-1)
     ], dim=-1)
-    
-    return {
+
+    # 应用随机偏移
+    random_offsets = None
+    if randomness > 0:
+        # 计算pitch（相邻PSF间距，像素单位）
+        pitch = output_size / M
+        # 标准差 = randomness × pitch
+        sigma = randomness * pitch
+
+        # 设置随机种子（如果提供）
+        if random_seed is not None:
+            torch.manual_seed(random_seed)
+
+        # 生成高斯随机偏移 [M*M, 2]
+        random_offsets = torch.randn(M * M, 2, device=device, dtype=torch.float32) * sigma
+
+        # 应用偏移到中心坐标
+        centers_pixel = centers_pixel + random_offsets
+
+        # 确保中心坐标在有效范围内
+        centers_pixel = centers_pixel.clamp(0.0, scale)
+
+    result = {
         'centers_pixel': centers_pixel, # 输出坐标
         'centers_geom_pixel': centers_geom_pixel, # 输出坐标
         'scale': scale, # 输出坐标
@@ -171,6 +201,11 @@ def compute_psf_centers(
         'region_size_norm': region_size_norm, # 透镜坐标
         'stride_norm': stride_norm # 透镜坐标
     }
+
+    if random_offsets is not None:
+        result['random_offsets'] = random_offsets
+
+    return result
 
 
 def assign_tile_group(

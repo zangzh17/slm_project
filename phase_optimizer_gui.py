@@ -6,6 +6,8 @@ Provides interactive widgets for configuring and managing optimization jobs.
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 import copy
+import os
+import json
 from datetime import datetime
 import numpy as np
 
@@ -14,17 +16,20 @@ class PhaseOptimizerGUI:
     GUI class for managing phase optimization jobs in Jupyter notebook.
     """
     
-    def __init__(self, default_params=None):
+    def __init__(self, default_params=None, output_dir='./output'):
         """
         Initialize the GUI with optional default parameters.
-        
+
         Args:
             default_params: dict, optional default parameters from config
+            output_dir: str, directory containing existing recipe outputs
         """
         self.default_params = default_params or {}
+        self.output_dir = os.path.normpath(output_dir)
         self.job_list = []  # List of (job_title, params_dict) tuples
+        self.recipe_list = []  # List of existing recipes from output folder
         self.custom_prefix = ''  # Store custom prefix
-        
+
         self._create_widgets()
         self._setup_layout()
         self._setup_callbacks()
@@ -79,9 +84,28 @@ class PhaseOptimizerGUI:
         )
         
         self.w_airy_correction = widgets.FloatText(
-            value=1.0, description='Airy Correction:', 
+            value=1.0, description='Airy Correction:',
             style={'description_width': '100px'},
             layout=widgets.Layout(width='200px')
+        )
+
+        # Randomness parameters for PSF target variation
+        self.w_randomness = widgets.FloatText(
+            value=0.0, description='Randomness:',
+            style={'description_width': '100px'},
+            layout=widgets.Layout(width='200px')
+        )
+
+        self.w_use_random_seed = widgets.Checkbox(
+            value=False, description='Fixed:',
+            indent=False,
+            layout=widgets.Layout(width='60px')
+        )
+
+        self.w_random_seed = widgets.IntText(
+            value=42, description='Seed:',
+            style={'description_width': '35px'},
+            layout=widgets.Layout(width='100px')
         )
         
         # Depth in focus - using Textarea for flexible list input
@@ -141,10 +165,18 @@ class PhaseOptimizerGUI:
             self.w_depth_generate_btn
         ])
         
+        # Randomness controls row
+        self.randomness_controls = widgets.HBox([
+            self.w_randomness,
+            self.w_use_random_seed,
+            self.w_random_seed
+        ])
+
         self.optimized_params_box = widgets.VBox([
             self.w_overlap_ratio,
             self.w_dof_info,  # Add DOF info display here
             self.w_airy_correction,
+            self.randomness_controls,
             self.w_depth_label,
             self.w_depth_in_focus,
             self.depth_quick_buttons,
@@ -205,6 +237,11 @@ class PhaseOptimizerGUI:
             layout=widgets.Layout(width='150px')
         )
         
+        # Job list header (dynamic)
+        self.w_job_list_header = widgets.HTML(
+            value='<h3>Job List (0 jobs)</h3>'
+        )
+
         # Job list display
         self.w_job_select = widgets.Select(
             options=[],
@@ -223,9 +260,47 @@ class PhaseOptimizerGUI:
             )
         )
         
+        # === Existing Recipe Browser ===
+        self.w_scan_recipes_btn = widgets.Button(
+            description='Scan Recipes',
+            button_style='info',
+            icon='search',
+            layout=widgets.Layout(width='130px')
+        )
+
+        self.w_recipe_select = widgets.SelectMultiple(
+            options=[],
+            description='Recipes:',
+            style={'description_width': '60px'},
+            layout=widgets.Layout(width='350px', height='120px')
+        )
+
+        self.w_load_recipe_btn = widgets.Button(
+            description='Load',
+            button_style='success',
+            icon='download',
+            tooltip='Load first selected recipe params to GUI',
+            layout=widgets.Layout(width='80px'),
+            disabled=True
+        )
+
+        self.w_randomize_btn = widgets.Button(
+            description='+ Randomize',
+            button_style='primary',
+            icon='random',
+            tooltip='Add selected recipes to Job List with current Randomness params',
+            layout=widgets.Layout(width='120px'),
+            disabled=True
+        )
+
+        self.w_recipe_info = widgets.HTML(
+            value='<i>Click "Scan Recipes" to find existing recipes</i>',
+            layout=widgets.Layout(width='350px')
+        )
+
         # Status output
         self.w_status = widgets.Output()
-    
+
     def _setup_layout(self):
         """Setup the widget layout."""
         # Common parameters section
@@ -253,21 +328,32 @@ class PhaseOptimizerGUI:
         
         # Job list section
         job_list_section = widgets.VBox([
-            widgets.HTML('<h3>Job List</h3>'),
+            self.w_job_list_header,
             self.w_job_select,
             widgets.HTML('<b>Job Details:</b>'),
             self.w_job_details
         ])
-        
+
+        # Existing recipe browser section
+        recipe_browser_section = widgets.VBox([
+            widgets.HTML('<h3>Load Existing Recipe</h3>'),
+            widgets.HBox([self.w_scan_recipes_btn, self.w_load_recipe_btn, self.w_randomize_btn]),
+            self.w_recipe_select,
+            self.w_recipe_info
+        ])
+
         # Left panel (parameters)
         left_panel = widgets.VBox([
             common_section,
             self.optimized_section,
             job_controls
         ])
-        
-        # Right panel (job list)
-        right_panel = job_list_section
+
+        # Right panel (job list + recipe browser)
+        right_panel = widgets.VBox([
+            job_list_section,
+            recipe_browser_section
+        ])
         
         # Main layout
         self.main_layout = widgets.VBox([
@@ -288,6 +374,9 @@ class PhaseOptimizerGUI:
         # Overlap ratio callback for DOF info
         self.w_overlap_ratio.observe(self._update_dof_info, names='value')
         self.w_overlap_ratio.observe(self._update_default_title, names='value')
+
+        # Randomness callback for title update
+        self.w_randomness.observe(self._update_default_title, names='value')
         
         # Custom prefix callback
         self.w_custom_prefix.observe(self._on_prefix_change, names='value')
@@ -305,7 +394,197 @@ class PhaseOptimizerGUI:
         # Template buttons callbacks
         self.w_template1_btn.on_click(self._on_template1)
         self.w_template2_btn.on_click(self._on_template2)
-    
+
+        # Recipe browser callbacks
+        self.w_scan_recipes_btn.on_click(self._on_scan_recipes)
+        self.w_load_recipe_btn.on_click(self._on_load_recipe)
+        self.w_randomize_btn.on_click(self._on_randomize_recipes)
+        self.w_recipe_select.observe(self._on_recipe_select, names='value')
+
+    def _scan_recipes(self):
+        """Scan output directory for existing recipes."""
+        self.recipe_list = []
+
+        if not os.path.exists(self.output_dir):
+            return
+
+        for item in sorted(os.listdir(self.output_dir)):
+            item_path = os.path.join(self.output_dir, item)
+            if os.path.isdir(item_path):
+                json_file = os.path.join(item_path, f'{item}.json')
+                npy_file = os.path.join(item_path, f'{item}.npy')
+
+                has_json = os.path.exists(json_file)
+                has_npy = os.path.exists(npy_file)
+
+                if has_json or has_npy:
+                    self.recipe_list.append({
+                        'title': item,
+                        'path': item_path,
+                        'has_params': has_json,
+                        'has_phase': has_npy,
+                        'json_path': json_file if has_json else None
+                    })
+
+    def _on_scan_recipes(self, btn):
+        """Handle scan recipes button click."""
+        self._scan_recipes()
+
+        # Update recipe selector
+        if self.recipe_list:
+            recipe_options = [
+                (f"{'✓' if r['has_params'] else '○'} {r['title']}", r['title'])
+                for r in self.recipe_list
+            ]
+            self.w_recipe_select.options = recipe_options
+            self.w_recipe_info.value = f'<span style="color: green;">Found {len(self.recipe_list)} recipe(s)</span>'
+        else:
+            self.w_recipe_select.options = []
+            self.w_recipe_info.value = f'<span style="color: orange;">No recipes found in {self.output_dir}</span>'
+
+        with self.w_status:
+            clear_output()
+            print(f"Scanned {self.output_dir}: found {len(self.recipe_list)} recipe(s)")
+
+    def _on_recipe_select(self, change):
+        """Handle recipe selection change (supports multi-select)."""
+        selected = change['new']  # tuple of selected values
+        if not selected:
+            self.w_load_recipe_btn.disabled = True
+            self.w_randomize_btn.disabled = True
+            self.w_recipe_info.value = '<i>Select recipe(s) to load or randomize</i>'
+            return
+
+        # Count selected recipes with params
+        selected_with_params = []
+        for title in selected:
+            for r in self.recipe_list:
+                if r['title'] == title and r['has_params']:
+                    selected_with_params.append(r)
+                    break
+
+        # Enable buttons based on selection
+        self.w_load_recipe_btn.disabled = len(selected_with_params) == 0
+        self.w_randomize_btn.disabled = len(selected_with_params) == 0
+
+        # Show info
+        if len(selected) == 1:
+            recipe = selected_with_params[0] if selected_with_params else None
+            if recipe:
+                info_parts = [f"<b>{recipe['title']}</b>"]
+                info_parts.append('<span style="color: green;">Has params</span>')
+                self.w_recipe_info.value = ' | '.join(info_parts)
+            else:
+                self.w_recipe_info.value = f'<span style="color: orange;">{selected[0]}: No params file</span>'
+        else:
+            self.w_recipe_info.value = f'<b>{len(selected)} selected</b> ({len(selected_with_params)} with params)'
+
+    def _on_load_recipe(self, btn):
+        """Load first selected recipe parameters into GUI."""
+        selected = self.w_recipe_select.value
+        if not selected:
+            return
+
+        # Find the first recipe with params
+        recipe = None
+        for title in selected:
+            for r in self.recipe_list:
+                if r['title'] == title and r['has_params']:
+                    recipe = r
+                    break
+            if recipe:
+                break
+
+        if not recipe or not recipe['json_path']:
+            with self.w_status:
+                clear_output()
+                print(f"Cannot load recipe: no JSON file found")
+            return
+
+        # Load parameters from JSON
+        try:
+            with open(recipe['json_path'], 'r') as f:
+                params = json.load(f)
+
+            # Load parameters to widgets
+            self._load_params_to_widgets(params)
+
+            with self.w_status:
+                clear_output()
+                print(f"Loaded recipe: {recipe['title']}")
+                print(f"Mode: {params.get('mode', 'unknown')}, M: {params.get('M')}")
+
+        except Exception as e:
+            with self.w_status:
+                clear_output()
+                print(f"Error loading recipe: {e}")
+
+    def _on_randomize_recipes(self, btn):
+        """Add selected recipes to job list with current randomness params."""
+        selected = self.w_recipe_select.value
+        if not selected:
+            return
+
+        # Get current randomness params from GUI
+        randomness = self.w_randomness.value
+        random_seed = self.w_random_seed.value if self.w_use_random_seed.value else None
+
+        added_count = 0
+        skipped_count = 0
+
+        for title in selected:
+            # Find the recipe
+            recipe = None
+            for r in self.recipe_list:
+                if r['title'] == title and r['has_params']:
+                    recipe = r
+                    break
+
+            if not recipe or not recipe['json_path']:
+                skipped_count += 1
+                continue
+
+            try:
+                # Load original params
+                with open(recipe['json_path'], 'r') as f:
+                    params = json.load(f)
+
+                # Update randomness params only
+                params['randomness'] = randomness
+                params['random_seed'] = random_seed
+
+                # Generate new job title with randomness suffix
+                if randomness > 0:
+                    new_title = f"{recipe['title']}_rand{randomness}"
+                else:
+                    new_title = f"{recipe['title']}_rand0"
+
+                # Check for duplicate titles
+                existing_titles = [j[0] for j in self.job_list]
+                if new_title in existing_titles:
+                    # Add suffix to make unique
+                    suffix = 1
+                    while f"{new_title}_{suffix}" in existing_titles:
+                        suffix += 1
+                    new_title = f"{new_title}_{suffix}"
+
+                # Add to job list
+                self.job_list.append((new_title, params))
+                added_count += 1
+
+            except Exception as e:
+                skipped_count += 1
+                continue
+
+        # Update display
+        self._update_job_list_display()
+
+        with self.w_status:
+            clear_output()
+            print(f"Added {added_count} job(s) with randomness={randomness}, seed={random_seed}")
+            if skipped_count > 0:
+                print(f"Skipped {skipped_count} recipe(s) (no params file)")
+
     def _update_dof_info(self, change):
         """Update DOF info display based on overlap ratio."""
         overlap_ratio = self.w_overlap_ratio.value
@@ -362,18 +641,23 @@ class PhaseOptimizerGUI:
         M = self.w_M.value
         focal = self.w_focal_length.value
         mode = self.w_mode.value
-        
+
         if mode == 'fresnel':
             return f'M{M}_fresnel_F{focal}'
         else:
             airy = self.w_airy_correction.value
             overlap = self.w_overlap_ratio.value
+            randomness = self.w_randomness.value
             depth_list = self._parse_depth_list()
             if depth_list:
                 depth_range = (max(depth_list) - min(depth_list))
-                return f'M{M}_depth_range_{depth_range}x_airy{airy}_over{overlap}'
+                base = f'M{M}_depth_range_{depth_range}x_airy{airy}_over{overlap}'
             else:
-                return f'M{M}_airy{airy}_over{overlap}_optimized'
+                base = f'M{M}_airy{airy}_over{overlap}_optimized'
+            # Add randomness suffix if enabled
+            if randomness > 0:
+                base += f'_rand{randomness}'
+            return base
     
     def _update_default_title(self, change):
         """Update default job title based on parameters."""
@@ -484,7 +768,9 @@ class PhaseOptimizerGUI:
             params['airy_correction'] = self.w_airy_correction.value
             params['depth_in_focus'] = self._parse_depth_list()
             params['mask_count'] = 0
-        
+            params['randomness'] = self.w_randomness.value
+            params['random_seed'] = self.w_random_seed.value if self.w_use_random_seed.value else None
+
         return params
     
     def _on_add_job(self, btn):
@@ -538,6 +824,9 @@ class PhaseOptimizerGUI:
         self.w_job_select.options = titles
         if titles:
             self.w_job_select.value = titles[-1]
+        # Update header with job count
+        count = len(self.job_list)
+        self.w_job_list_header.value = f'<h3>Job List ({count} job{"s" if count != 1 else ""})</h3>'
     
     def _on_job_select(self, change):
         """Handle job selection - show details and load parameters."""
@@ -571,6 +860,9 @@ class PhaseOptimizerGUI:
                 print(f"Overlap Ratio: {params.get('overlap_ratio')}")
                 print(f"Airy Correction: {params.get('airy_correction')}")
                 print(f"Depth in Focus: {params.get('depth_in_focus')}")
+                print(f"Randomness: {params.get('randomness', 0.0)}")
+                seed = params.get('random_seed')
+                print(f"Random Seed: {seed if seed is not None else 'None (random)'}")
         
         # Load parameters into widgets
         self._load_params_to_widgets(params)
@@ -588,6 +880,13 @@ class PhaseOptimizerGUI:
             self.w_airy_correction.value = params.get('airy_correction', 1.0)
             depth_list = params.get('depth_in_focus', [])
             self.w_depth_in_focus.value = ', '.join(str(x) for x in depth_list)
+            self.w_randomness.value = params.get('randomness', 0.0)
+            seed = params.get('random_seed')
+            if seed is not None:
+                self.w_random_seed.value = seed
+                self.w_use_random_seed.value = True
+            else:
+                self.w_use_random_seed.value = False
     
     def display(self):
         """Display the GUI."""
@@ -603,16 +902,17 @@ class PhaseOptimizerGUI:
         return copy.deepcopy(self.job_list)
 
 
-def create_optimizer_gui(default_params=None):
+def create_optimizer_gui(default_params=None, output_dir='./output'):
     """
     Create and display the optimizer GUI.
-    
+
     Args:
         default_params: dict, optional default parameters from config
-    
+        output_dir: str, directory containing existing recipe outputs (for loading)
+
     Returns:
         PhaseOptimizerGUI: The GUI instance for accessing job list
     """
-    gui = PhaseOptimizerGUI(default_params)
+    gui = PhaseOptimizerGUI(default_params, output_dir=output_dir)
     gui.display()
     return gui

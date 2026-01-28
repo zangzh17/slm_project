@@ -1,28 +1,29 @@
 {
+    "focal_length": 0.07390000000000001,
+    "N": 850,
+    "output_size": 850,
+    "roi_center_y": 576,
+    "roi_center_x": 960,
     "M": 9,
-    "N": 864,
-    "output_size": 864,
-    "focal_length": 0.0739,
     "two_pi_value": 210,
-    "overlap_ratio": 0.3,
+    "overlap_ratio": 0.25,
+    "dof_correction": 1.0,
     "airy_correction": 1.0,
     "center_blend": 0.0,
-    "randomness": 0.0,
-    "random_seed": 42,
+    "interleaving": "coarse1",
+    "mask_count": 0,
+    "psf_energy_level": 1.0,
+    "z_factor": 0.2,
+    "lr": 0.05,
+    "ni": 500,
     "depth_in_focus": [
         -0.5,
         0.5
     ],
     "depth_out_focus": null,
-    "dof_correction": 1.0,
-    "lr": 0.31622776601683794,
-    "ni": 120,
-    "show_iters": 12,
-    "mask_count": 2,
-    "interleaving": "coarse1",
-    "masked_airy_correction": 1.0,
     "focusing_eff_correction": 1.0,
-    "psf_energy_level": 1.0,
+    "masked_airy_correction": 1.0,
+    "show_iters": 50,
     "weights": {
         "mse": 1.0,
         "depth_in_focus": 1.0,
@@ -35,6 +36,7 @@
         1152,
         1920
     ],
-    "roi_center_x": 977,
-    "roi_center_y": 545
+    "mode": "optimized",
+    "randomness": 0.15,
+    "random_seed": 42
 }

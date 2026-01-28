@@ -427,7 +427,7 @@ class JobBrowserGUI:
                 
                 # Import visualization functions
                 from visualization import (
-                    plot_phase, plot_2d_comparisons, 
+                    plot_phase, plot_2d_comparisons, plot_2d_comparisons_interactive,
                     plot_cross_sections, plot_energy_distribution
                 )
                 
@@ -438,7 +438,7 @@ class JobBrowserGUI:
                     plot_phase(self.current_optimizer)
                 
                 if checkboxes[1].value:
-                    plot_2d_comparisons(self.current_optimizer)
+                    plot_2d_comparisons_interactive(self.current_optimizer)
                 
                 if checkboxes[2].value:
                     plot_cross_sections(self.current_optimizer, upsampling=upsampling)
